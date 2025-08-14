@@ -313,3 +313,202 @@ TEST_F(SafeConfigChangesTest, ConfigurationChangePerformance) {
     double avg_time_per_op = static_cast<double>(duration.count()) / num_operations;
     EXPECT_LT(avg_time_per_op, 100.0) << "Average time per operation: " << avg_time_per_op << "μs";
 } 
+
+// Test the enhanced symmetric difference algorithm specifically
+TEST_F(SafeConfigChangesTest, EnhancedSymmetricDifferenceAlgorithm) {
+    NodeConfiguration base = ReplicationState::parse_node_configuration(three_node_config);
+    
+    // Test Case 1: Simple addition (symmetric difference = 1)
+    NodeConfiguration add_one = base;
+    add_one.hostname_nodes.push_back("node4.example.com:8107:8108");
+    EXPECT_TRUE(base.is_safe_single_node_change(add_one)) 
+        << "Single addition should be valid (symmetric diff = 1)";
+    
+    // Test Case 2: Simple removal (symmetric difference = 1)
+    NodeConfiguration remove_one = base;
+    remove_one.hostname_nodes.pop_back();
+    EXPECT_TRUE(base.is_safe_single_node_change(remove_one))
+        << "Single removal should be valid (symmetric diff = 1)";
+    
+    // Test Case 3: Node replacement (remove + add = symmetric difference = 2)
+    NodeConfiguration replace_node = base;
+    replace_node.hostname_nodes.pop_back(); // Remove last
+    replace_node.hostname_nodes.push_back("replacement.example.com:8107:8108"); // Add different
+    EXPECT_FALSE(base.is_safe_single_node_change(replace_node))
+        << "Node replacement should be invalid (symmetric diff = 2)";
+    
+    // Test Case 4: Multiple additions (symmetric difference > 1)
+    NodeConfiguration add_multiple = base;
+    add_multiple.hostname_nodes.push_back("node4.example.com:8107:8108");
+    add_multiple.hostname_nodes.push_back("node5.example.com:8107:8108");
+    EXPECT_FALSE(base.is_safe_single_node_change(add_multiple))
+        << "Multiple additions should be invalid (symmetric diff = 2)";
+    
+    // Test Case 5: Multiple removals (symmetric difference > 1)
+    NodeConfiguration remove_multiple = base;
+    remove_multiple.hostname_nodes.pop_back();
+    remove_multiple.hostname_nodes.pop_back();
+    EXPECT_FALSE(base.is_safe_single_node_change(remove_multiple))
+        << "Multiple removals should be invalid (symmetric diff = 2)";
+    
+    // Test Case 6: No change (symmetric difference = 0)
+    NodeConfiguration no_change = base;
+    EXPECT_FALSE(base.is_safe_single_node_change(no_change))
+        << "No change should be invalid (symmetric diff = 0)";
+    
+    // Test Case 7: Mixed hostname and IP nodes
+    std::string mixed_config = "node1.example.com:8107:8108,192.168.1.10:8107:8108,node3.example.com:8107:8108";
+    NodeConfiguration mixed_base = ReplicationState::parse_node_configuration(mixed_config);
+    
+    NodeConfiguration mixed_add_hostname = mixed_base;
+    mixed_add_hostname.hostname_nodes.push_back("node4.example.com:8107:8108");
+    EXPECT_TRUE(mixed_base.is_safe_single_node_change(mixed_add_hostname))
+        << "Adding hostname to mixed config should be valid";
+    
+    NodeConfiguration mixed_add_ip = mixed_base;
+    mixed_add_ip.ip_nodes.push_back("192.168.1.20:8107:8108");
+    EXPECT_TRUE(mixed_base.is_safe_single_node_change(mixed_add_ip))
+        << "Adding IP to mixed config should be valid";
+    
+    // Test Case 8: Cross-type replacement (hostname -> IP)
+    NodeConfiguration cross_replace = mixed_base;
+    cross_replace.hostname_nodes.pop_back(); // Remove hostname
+    cross_replace.ip_nodes.push_back("192.168.1.30:8107:8108"); // Add IP
+    EXPECT_FALSE(mixed_base.is_safe_single_node_change(cross_replace))
+        << "Cross-type replacement should be invalid (symmetric diff = 2)";
+}
+
+// Test the enhanced version comparison algorithm specifically
+TEST_F(SafeConfigChangesTest, EnhancedVersionComparisonAlgorithm) {
+    NodeConfiguration base = ReplicationState::parse_node_configuration(three_node_config);
+    
+    // Test Case 1: Normal term comparison (higher term wins)
+    NodeConfiguration config1 = base;
+    config1.config_term = 5;
+    config1.config_version = 10;
+    
+    NodeConfiguration config2 = base;
+    config2.config_term = 6;
+    config2.config_version = 5; // Lower version but higher term
+    
+    EXPECT_TRUE(config2.is_newer_than(config1))
+        << "Higher term should win even with lower version";
+    EXPECT_FALSE(config1.is_newer_than(config2))
+        << "Lower term should lose even with higher version";
+    
+    // Test Case 2: Same term, version comparison
+    NodeConfiguration config3 = base;
+    config3.config_term = 5;
+    config3.config_version = 15; // Higher version, same term
+    
+    EXPECT_TRUE(config3.is_newer_than(config1))
+        << "Higher version should win with same term";
+    EXPECT_FALSE(config1.is_newer_than(config3))
+        << "Lower version should lose with same term";
+    
+    // Test Case 3: Force reconfig (term = -1) - Version-only comparison
+    NodeConfiguration force_config = base;
+    force_config.config_term = -1; // Uninitialized/force reconfig
+    force_config.config_version = 20;
+    
+    NodeConfiguration normal_config = base;
+    normal_config.config_term = 10; // High term
+    normal_config.config_version = 15; // Lower version
+    
+    EXPECT_TRUE(force_config.is_newer_than(normal_config))
+        << "Force reconfig with higher version should win against any term";
+    EXPECT_FALSE(normal_config.is_newer_than(force_config))
+        << "Normal config should lose to force reconfig with higher version";
+    
+    // Test Case 4: Both force reconfigs (both term = -1) - Version-only comparison
+    NodeConfiguration force_config1 = base;
+    force_config1.config_term = -1;
+    force_config1.config_version = 25;
+    
+    NodeConfiguration force_config2 = base;
+    force_config2.config_term = -1;
+    force_config2.config_version = 30;
+    
+    EXPECT_TRUE(force_config2.is_newer_than(force_config1))
+        << "Among force reconfigs, higher version should win";
+    EXPECT_FALSE(force_config1.is_newer_than(force_config2))
+        << "Among force reconfigs, lower version should lose";
+    
+    // Test Case 5: Force reconfig vs lower version normal config
+    NodeConfiguration force_low_version = base;
+    force_low_version.config_term = -1;
+    force_low_version.config_version = 5; // Very low version
+    
+    NodeConfiguration normal_high = base;
+    normal_high.config_term = 1; // Low term
+    normal_high.config_version = 100; // Very high version
+    
+    EXPECT_FALSE(force_low_version.is_newer_than(normal_high))
+        << "Force reconfig with lower version should lose";
+    EXPECT_TRUE(normal_high.is_newer_than(force_low_version))
+        << "Normal config with higher version should win against force reconfig";
+    
+    // Test Case 6: Edge case - identical configurations
+    NodeConfiguration identical1 = base;
+    identical1.config_term = 5;
+    identical1.config_version = 10;
+    
+    NodeConfiguration identical2 = base;
+    identical2.config_term = 5;
+    identical2.config_version = 10;
+    
+    EXPECT_FALSE(identical1.is_newer_than(identical2))
+        << "Identical configurations should not be newer than each other";
+    EXPECT_FALSE(identical2.is_newer_than(identical1))
+        << "Identical configurations should not be newer than each other";
+}
+
+// Test edge cases that the symmetric difference algorithm handles better
+TEST_F(SafeConfigChangesTest, SymmetricDifferenceEdgeCases) {
+    // Test Case 1: Empty to single node (bootstrap scenario)
+    NodeConfiguration empty = ReplicationState::parse_node_configuration("");
+    NodeConfiguration single = ReplicationState::parse_node_configuration("node1.example.com:8107:8108");
+    
+    EXPECT_TRUE(empty.is_safe_single_node_change(single))
+        << "Bootstrap from empty to single node should be valid";
+    
+    // Test Case 2: Single to empty (shutdown scenario - should be invalid)
+    EXPECT_FALSE(single.is_safe_single_node_change(empty))
+        << "Shutdown to empty cluster should be invalid";
+    
+    // Test Case 3: Duplicate node handling
+    std::string with_duplicates = "node1.example.com:8107:8108,node1.example.com:8107:8108,node2.example.com:8107:8108";
+    NodeConfiguration dup_config = ReplicationState::parse_node_configuration(with_duplicates);
+    
+    NodeConfiguration dup_add = dup_config;
+    dup_add.hostname_nodes.push_back("node3.example.com:8107:8108");
+    
+    EXPECT_TRUE(dup_config.is_safe_single_node_change(dup_add))
+        << "Adding to config with duplicates should work (sets handle duplicates)";
+    
+    // Test Case 4: Large cluster single change
+    std::vector<std::string> many_nodes;
+    for (int i = 1; i <= 20; ++i) {
+        many_nodes.push_back("node" + std::to_string(i) + ".example.com:8107:8108");
+    }
+    std::string large_config = StringUtils::join(many_nodes, ",");
+    NodeConfiguration large = ReplicationState::parse_node_configuration(large_config);
+    
+    NodeConfiguration large_plus_one = large;
+    large_plus_one.hostname_nodes.push_back("node21.example.com:8107:8108");
+    
+    EXPECT_TRUE(large.is_safe_single_node_change(large_plus_one))
+        << "Single addition to large cluster should be valid";
+    
+    // Test Case 5: Complex mixed operations that look like single changes but aren't
+    NodeConfiguration base = ReplicationState::parse_node_configuration("node1.example.com:8107:8108,node2.example.com:8107:8108,192.168.1.10:8107:8108");
+    
+    NodeConfiguration complex_invalid = base;
+    // Remove hostname, add hostname, remove IP (net: -1 hostname, -1 IP, +1 hostname = symmetric diff = 3)
+    complex_invalid.hostname_nodes.erase(complex_invalid.hostname_nodes.begin()); // Remove first hostname
+    complex_invalid.hostname_nodes.push_back("newnode.example.com:8107:8108"); // Add different hostname  
+    complex_invalid.ip_nodes.pop_back(); // Remove IP
+    
+    EXPECT_FALSE(base.is_safe_single_node_change(complex_invalid))
+        << "Complex multi-change should be invalid even if net change looks like 1";
+} 

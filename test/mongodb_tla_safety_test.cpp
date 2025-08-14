@@ -339,3 +339,232 @@ TEST_F(MongoDBTLASafetyTest, EdgeCasesAndErrorHandling) {
     EXPECT_EQ(101, large_plus_one.total_nodes());
     EXPECT_TRUE(large.is_safe_single_node_change(large_plus_one));
 } 
+
+// Additional MongoDB-inspired test cases at the end of the file
+
+// Test MongoDB's symmetric difference algorithm specifically
+TEST_F(MongoDBTLASafetyTest, SymmetricDifferenceValidation) {
+    NodeConfiguration base = ReplicationState::parse_node_configuration(three_node_config);
+    
+    // Test valid single additions
+    NodeConfiguration add_one = base;
+    add_one.hostname_nodes.push_back("node4.example.com:8107:8108");
+    add_one.config_version++;
+    EXPECT_TRUE(base.is_safe_single_node_change(add_one));
+    
+    // Test valid single removals
+    NodeConfiguration remove_one = base;
+    remove_one.hostname_nodes.pop_back();
+    remove_one.config_version++;
+    EXPECT_TRUE(base.is_safe_single_node_change(remove_one));
+    
+    // Test invalid multi-node changes
+    NodeConfiguration add_two = base;
+    add_two.hostname_nodes.push_back("node4.example.com:8107:8108");
+    add_two.hostname_nodes.push_back("node5.example.com:8107:8108");
+    add_two.config_version++;
+    EXPECT_FALSE(base.is_safe_single_node_change(add_two));
+    
+    // Test invalid swap operations (remove one, add one different)
+    NodeConfiguration swap = base;
+    swap.hostname_nodes.pop_back(); // Remove last
+    swap.hostname_nodes.push_back("node4.example.com:8107:8108"); // Add different
+    swap.config_version++;
+    EXPECT_FALSE(base.is_safe_single_node_change(swap)); // Symmetric diff = 2
+}
+
+// Test MongoDB's uninitialized term handling
+TEST_F(MongoDBTLASafetyTest, UninitializedTermHandling) {
+    NodeConfiguration config1 = ReplicationState::parse_node_configuration(three_node_config);
+    config1.config_term = 5;
+    config1.config_version = 10;
+    
+    NodeConfiguration config2 = ReplicationState::parse_node_configuration(three_node_config);
+    config2.config_term = -1; // Uninitialized (force reconfig)
+    config2.config_version = 15;
+    
+    NodeConfiguration config3 = ReplicationState::parse_node_configuration(three_node_config);
+    config3.config_term = 10;
+    config3.config_version = 5;
+    
+    // Force reconfig (term=-1) with higher version should win
+    EXPECT_TRUE(config2.is_newer_than(config1));
+    EXPECT_TRUE(config2.is_newer_than(config3));
+    
+    // Normal term comparison should still work
+    EXPECT_TRUE(config3.is_newer_than(config1));
+    
+    // Same uninitialized terms should compare by version
+    NodeConfiguration config4 = config2;
+    config4.config_version = 20;
+    EXPECT_TRUE(config4.is_newer_than(config2));
+}
+
+// Test MongoDB's replica set ID consistency pattern
+TEST_F(MongoDBTLASafetyTest, ConfigurationConsistencyValidation) {
+    NodeConfiguration config1 = ReplicationState::parse_node_configuration(three_node_config);
+    config1.config_term = 1;
+    config1.config_version = 5;
+    
+    NodeConfiguration config2 = ReplicationState::parse_node_configuration(three_node_config);
+    config2.config_term = 1;
+    config2.config_version = 4; // Lower version
+    
+    NodeConfiguration config3 = ReplicationState::parse_node_configuration(three_node_config);
+    config3.config_term = 0; // Lower term
+    config3.config_version = 10; // Higher version
+    
+    // Higher (term, version) should win
+    EXPECT_TRUE(config1.is_newer_than(config2));
+    EXPECT_TRUE(config1.is_newer_than(config3));
+    EXPECT_FALSE(config2.is_newer_than(config1));
+    EXPECT_FALSE(config3.is_newer_than(config1));
+}
+
+// Test MongoDB's arbiter priority validation pattern
+TEST_F(MongoDBTLASafetyTest, MixedNodeTypeValidation) {
+    // Test mixed hostname and IP configurations
+    std::string mixed_with_duplicates = "node1.example.com:8107:8108,192.168.1.10:8107:8108,node1.example.com:8107:8108";
+    NodeConfiguration config = ReplicationState::parse_node_configuration(mixed_with_duplicates);
+    
+    // Should handle duplicates gracefully
+    EXPECT_EQ(2, config.total_nodes()); // Duplicates should be removed
+    
+    // Test IP address validation
+    std::string invalid_ips = "node1.example.com:8107:8108,999.999.999.999:8107:8108,192.168.1.10:8107:8108";
+    NodeConfiguration config_invalid = ReplicationState::parse_node_configuration(invalid_ips);
+    EXPECT_EQ(3, config_invalid.total_nodes()); // Should still parse, validation happens elsewhere
+}
+
+// Test MongoDB's quorum calculation edge cases
+TEST_F(MongoDBTLASafetyTest, QuorumCalculationEdgeCases) {
+    // Single node cluster
+    NodeConfiguration single = ReplicationState::parse_node_configuration("node1.example.com:8107:8108");
+    EXPECT_EQ(1, single.total_nodes());
+    
+    // Two node cluster
+    NodeConfiguration two_node = ReplicationState::parse_node_configuration("node1.example.com:8107:8108,node2.example.com:8107:8108");
+    EXPECT_EQ(2, two_node.total_nodes());
+    
+    // Large cluster (MongoDB supports up to 50 members)
+    std::vector<std::string> many_nodes;
+    for (int i = 1; i <= 50; ++i) {
+        many_nodes.push_back("node" + std::to_string(i) + ".example.com:8107:8108");
+    }
+    std::string large_config = StringUtils::join(many_nodes, ",");
+    NodeConfiguration large = ReplicationState::parse_node_configuration(large_config);
+    EXPECT_EQ(50, large.total_nodes());
+    
+    // Test single-node changes on large cluster
+    NodeConfiguration large_plus_one = large.create_single_node_change("node51.example.com:8107:8108", "", 1);
+    EXPECT_EQ(51, large_plus_one.total_nodes());
+    EXPECT_TRUE(large.is_safe_single_node_change(large_plus_one));
+}
+
+// Test MongoDB's configuration change timing and versioning
+TEST_F(MongoDBTLASafetyTest, ConfigurationTimingAndVersioning) {
+    NodeConfiguration base = ReplicationState::parse_node_configuration(three_node_config);
+    base.config_term = 5;
+    base.config_version = 10;
+    auto base_time = base.created_at;
+    
+    // Sleep to ensure time difference
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    
+    NodeConfiguration newer = base.create_single_node_change("node4.example.com:8107:8108", "", 6);
+    
+    EXPECT_EQ(6, newer.config_term);
+    EXPECT_EQ(11, newer.config_version);
+    EXPECT_GT(newer.created_at, base_time);
+    EXPECT_TRUE(newer.is_newer_than(base));
+}
+
+// Test MongoDB's heartbeat and health check patterns
+TEST_F(MongoDBTLASafetyTest, HealthCheckPatterns) {
+    NodeConfiguration config = ReplicationState::parse_node_configuration(five_node_config);
+    
+    // Test serialization with metadata (used for health checks)
+    std::string with_metadata = config.serialize_with_metadata();
+    EXPECT_TRUE(with_metadata.find("version=1") != std::string::npos);
+    EXPECT_TRUE(with_metadata.find("term=0") != std::string::npos);
+    EXPECT_TRUE(with_metadata.find("nodes=5") != std::string::npos);
+    
+    // Test that basic serialization doesn't include metadata
+    std::string basic = config.serialize();
+    EXPECT_EQ(five_node_config, basic);
+    EXPECT_TRUE(basic.find("version=") == std::string::npos);
+}
+
+// Test MongoDB's error handling and edge cases
+TEST_F(MongoDBTLASafetyTest, ErrorHandlingEdgeCases) {
+    // Empty configuration
+    NodeConfiguration empty = ReplicationState::parse_node_configuration("");
+    EXPECT_TRUE(empty.empty());
+    EXPECT_EQ(0, empty.total_nodes());
+    
+    // Single malformed entry
+    NodeConfiguration malformed = ReplicationState::parse_node_configuration("malformed");
+    EXPECT_EQ(1, malformed.total_nodes());
+    
+    // Mixed valid and malformed
+    NodeConfiguration mixed_validity = ReplicationState::parse_node_configuration("node1.example.com:8107:8108,malformed,node2.example.com:8107:8108");
+    EXPECT_EQ(3, mixed_validity.total_nodes());
+    
+    // Test that changes to empty configs are handled
+    NodeConfiguration empty_plus_one = empty.create_single_node_change("node1.example.com:8107:8108", "", 1);
+    EXPECT_EQ(1, empty_plus_one.total_nodes());
+    // Empty to single node should be valid (bootstrap case)
+    // Note: MongoDB allows this for initial replica set creation
+}
+
+// Test MongoDB's concurrent configuration change safety
+TEST_F(MongoDBTLASafetyTest, ConcurrentConfigurationChangeSafety) {
+    const int num_threads = 8;
+    const int changes_per_thread = 25;
+    std::vector<std::thread> threads;
+    std::atomic<int> successful_changes{0};
+    std::atomic<int> failed_changes{0};
+    
+    NodeConfiguration base_config = ReplicationState::parse_node_configuration(five_node_config);
+    
+    for (int i = 0; i < num_threads; ++i) {
+        threads.emplace_back([&, i]() {
+            for (int j = 0; j < changes_per_thread; ++j) {
+                try {
+                    std::string new_node = "thread" + std::to_string(i) + "node" + std::to_string(j) + ".example.com:8107:8108";
+                    
+                    // Create a change
+                    NodeConfiguration changed = base_config.create_single_node_change(new_node, "", i * 10 + j);
+                    
+                    // Validate the change
+                    if (base_config.is_safe_single_node_change(changed)) {
+                        successful_changes++;
+                    } else {
+                        failed_changes++;
+                    }
+                    
+                    // Test version comparison
+                    if (changed.is_newer_than(base_config)) {
+                        successful_changes++;
+                    } else {
+                        failed_changes++;
+                    }
+                    
+                    std::this_thread::sleep_for(std::chrono::microseconds(1));
+                } catch (...) {
+                    failed_changes++;
+                }
+            }
+        });
+    }
+    
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    
+    // All operations should succeed (they're all single-node additions)
+    int expected_operations = num_threads * changes_per_thread * 2; // 2 operations per iteration
+    EXPECT_EQ(expected_operations, successful_changes.load() + failed_changes.load());
+    EXPECT_EQ(expected_operations, successful_changes.load()); // All should succeed
+    EXPECT_EQ(0, failed_changes.load());
+} 

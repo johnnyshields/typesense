@@ -12,6 +12,7 @@
 #include <chrono>
 #include <regex>
 #include <algorithm>
+#include <set>
 
 #include "http_data.h"
 #include "threadpool.h"
@@ -44,9 +45,18 @@ struct NodeConfiguration {
     
     /**
      * Check if this configuration is newer than another (MongoDB TLA+ pattern).
-     * Compares by (config_term, config_version) tuple.
+     * Compares by (config_term, config_version) tuple with uninitialized term handling.
      */
     bool is_newer_than(const NodeConfiguration& other) const {
+        const int64_t kUninitializedTerm = -1;
+        
+        // MongoDB pattern: If either term is uninitialized (-1), ignore terms and compare versions only
+        // This allows force reconfigs to override other configs using high version numbers
+        if (config_term == kUninitializedTerm || other.config_term == kUninitializedTerm) {
+            return config_version > other.config_version;
+        }
+        
+        // Standard MongoDB TLA+ ordering: term first, then version
         return config_term > other.config_term || 
                (config_term == other.config_term && config_version > other.config_version);
     }
@@ -91,48 +101,54 @@ struct NodeConfiguration {
     
     /**
      * Validate that a configuration change is safe (single node only).
-     * Implements MongoDB's single-node change safety rule.
+     * Implements MongoDB's single-node change safety rule using set symmetric difference.
      */
     bool is_safe_single_node_change(const NodeConfiguration& new_config) const {
-        size_t old_total = total_nodes();
-        size_t new_total = new_config.total_nodes();
+        // MongoDB TLA+ pattern: Use set symmetric difference to validate single-node changes
+        // This ensures that exactly one voting member is added or removed
         
-        // Must be exactly +1 or -1 node change
-        if (std::abs(static_cast<int>(new_total) - static_cast<int>(old_total)) != 1) {
+        // Create sets of all nodes (both hostname and IP nodes are voting members)
+        std::set<std::string> old_nodes_set, new_nodes_set;
+        
+        // Add all current nodes to old set
+        for (const auto& node : hostname_nodes) {
+            old_nodes_set.insert(node);
+        }
+        for (const auto& node : ip_nodes) {
+            old_nodes_set.insert(node);
+        }
+        
+        // Add all new nodes to new set  
+        for (const auto& node : new_config.hostname_nodes) {
+            new_nodes_set.insert(node);
+        }
+        for (const auto& node : new_config.ip_nodes) {
+            new_nodes_set.insert(node);
+        }
+        
+        // MongoDB approach: Calculate symmetric difference
+        // The symmetric difference is the set of elements that are in either set but not in both
+        std::vector<std::string> symmetric_diff;
+        symmetric_diff.reserve(old_nodes_set.size() + new_nodes_set.size());
+        
+        std::set_symmetric_difference(
+            old_nodes_set.begin(), old_nodes_set.end(),
+            new_nodes_set.begin(), new_nodes_set.end(),
+            std::back_inserter(symmetric_diff)
+        );
+        
+        // MongoDB rule: Single-node change means symmetric difference size must be exactly 1
+        if (symmetric_diff.size() != 1) {
             return false;
         }
         
-        // Count actual differences
-        size_t differences = 0;
-        
-        // Check hostname nodes
-        for (const auto& node : hostname_nodes) {
-            if (std::find(new_config.hostname_nodes.begin(), 
-                         new_config.hostname_nodes.end(), node) == new_config.hostname_nodes.end()) {
-                differences++;
-            }
-        }
-        for (const auto& node : new_config.hostname_nodes) {
-            if (std::find(hostname_nodes.begin(), hostname_nodes.end(), node) == hostname_nodes.end()) {
-                differences++;
-            }
+        // Additional safety: Ensure we don't go below minimum viable cluster size
+        size_t new_total_nodes = new_config.total_nodes();
+        if (new_total_nodes < 1) {
+            return false;
         }
         
-        // Check IP nodes
-        for (const auto& node : ip_nodes) {
-            if (std::find(new_config.ip_nodes.begin(), 
-                         new_config.ip_nodes.end(), node) == new_config.ip_nodes.end()) {
-                differences++;
-            }
-        }
-        for (const auto& node : new_config.ip_nodes) {
-            if (std::find(ip_nodes.begin(), ip_nodes.end(), node) == ip_nodes.end()) {
-                differences++;
-            }
-        }
-        
-        // Should have exactly 1 difference (1 add OR 1 remove)
-        return differences == 1;
+        return true;
     }
     
     /**
