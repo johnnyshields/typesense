@@ -533,13 +533,18 @@ nlohmann::json ReplicationState::get_status() {
 
 ### 4.1 Test Coverage
 
-Our implementation includes **65 comprehensive test cases** covering:
+Our implementation includes **200+ comprehensive test cases** covering:
 
 - **DNS Failure Handling**: 14 tests
 - **Disaster Recovery Integration**: 11 tests  
 - **Safe Config Changes**: 15 tests
 - **MongoDB TLA+ Safety**: 20 tests
 - **Raft Server Core**: 5 tests
+- **Config Manager Module**: 35 tests
+- **Safety Validator Module**: 30 tests
+- **HTTP Handler Module**: 25 tests
+- **Lifecycle Manager Module**: 28 tests
+- **Node Manager Module**: 32 tests
 
 ### 4.2 Key Test Categories
 
@@ -565,6 +570,53 @@ TEST_F(DNSFailureHandlingTest, DNSResolutionFlow)
 TEST_F(DisasterRecoveryIntegrationTest, SingleNodeIPChange)
 TEST_F(DisasterRecoveryIntegrationTest, CompleteDisasterRecoveryFlow)
 TEST_F(DisasterRecoveryIntegrationTest, ImmediateRefreshTrigger)
+```
+
+#### **Module-Specific Tests**
+
+**Config Manager Tests**
+```cpp
+TEST_F(RaftConfigManagerTest, Hostname2IPStrBasicResolution)
+TEST_F(RaftConfigManagerTest, ParseNodeConfigurationMixedNodes)
+TEST_F(RaftConfigManagerTest, ConcurrentConfigurationParsing)
+TEST_F(RaftConfigManagerTest, LargeConfigurationParsing)
+TEST_F(RaftConfigManagerTest, ConfigurationSerializationRoundTrip)
+```
+
+**Safety Validator Tests**
+```cpp
+TEST_F(RaftSafetyValidatorTest, HandlePeerFailureHostnameMatch)
+TEST_F(RaftSafetyValidatorTest, MongoDBTLAPatternsStructure)
+TEST_F(RaftSafetyValidatorTest, ThreadSafetySafetyValidation)
+TEST_F(RaftSafetyValidatorTest, SafetyValidationPerformance)
+TEST_F(RaftSafetyValidatorTest, AtomicOperationsThreadSafety)
+```
+
+**HTTP Handler Tests**
+```cpp
+TEST_F(RaftHttpHandlerTest, HandleGzipWithGzipEncoding)
+TEST_F(RaftHttpHandlerTest, GetNodeUrlPathBasicConstruction)
+TEST_F(RaftHttpHandlerTest, ConcurrentHttpHandling)
+TEST_F(RaftHttpHandlerTest, GzipPerformance)
+TEST_F(RaftHttpHandlerTest, LargeRequestMemoryHandling)
+```
+
+**Lifecycle Manager Tests**
+```cpp
+TEST_F(RaftLifecycleManagerTest, StartWithBasicParameters)
+TEST_F(RaftLifecycleManagerTest, OnSnapshotSaveWithoutStore)
+TEST_F(RaftLifecycleManagerTest, ConcurrentLifecycleOperations)
+TEST_F(RaftLifecycleManagerTest, SnapshotPerformance)
+TEST_F(RaftLifecycleManagerTest, AtomicLifecycleOperations)
+```
+
+**Node Manager Tests**
+```cpp
+TEST_F(RaftNodeManagerTest, RefreshNodesBasicConfiguration)
+TEST_F(RaftNodeManagerTest, ConcurrentNodeManagementOps)
+TEST_F(RaftNodeManagerTest, NodeManagementPerformance)
+TEST_F(RaftNodeManagerTest, ThreadSafetyNodeManagement)
+TEST_F(RaftNodeManagerTest, DependencyInjection)
 ```
 
 ---
@@ -701,7 +753,7 @@ The Typesense Raft implementation provides:
 
 ### **✅ Developer-Friendly Architecture**
 - Modular design with clear separation of concerns
-- Comprehensive test coverage (65 test cases)
+- Comprehensive test coverage (200+ test cases)
 - Extensive documentation and monitoring
 - Easy to extend and maintain
 
