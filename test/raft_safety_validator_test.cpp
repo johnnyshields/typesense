@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
+#include <thread>
+#include <chrono>
 #include "raft_server.h"
+#include "string_utils.h"
 
 // Unit Tests for raft_safety_validator.cpp
 // Tests MongoDB TLA+ safety patterns and peer failure handling
@@ -401,4 +404,191 @@ TEST_F(RaftSafetyValidatorTest, SafetyValidationPerformance) {
     
     double avg_time_per_validation = static_cast<double>(duration.count()) / 1000.0;
     EXPECT_LT(avg_time_per_validation, 100.0); // < 100μs per validation
+}
+
+// NodeConfiguration Unit Tests
+// These tests focus on the core NodeConfiguration struct functionality
+
+TEST_F(RaftSafetyValidatorTest, NodeConfigurationVersioning) {
+    NodeConfiguration config1 = repl_state->parse_node_configuration(three_node_config);
+    
+    // Initial version should be 1
+    EXPECT_EQ(1, config1.config_version);
+    EXPECT_EQ(0, config1.config_term);
+    
+    // Create a new version
+    NodeConfiguration config2 = config1.create_single_node_change("node4.example.com:8107:8108", "", 5);
+    
+    EXPECT_EQ(2, config2.config_version);
+    EXPECT_EQ(5, config2.config_term);
+    EXPECT_TRUE(config2.is_newer_than(config1));
+    EXPECT_FALSE(config1.is_newer_than(config2));
+}
+
+TEST_F(RaftSafetyValidatorTest, NodeConfigurationVersionComparison) {
+    NodeConfiguration config1 = repl_state->parse_node_configuration(three_node_config);
+    NodeConfiguration config2 = config1;
+    
+    // Same version and term
+    EXPECT_FALSE(config1.is_newer_than(config2));
+    EXPECT_FALSE(config2.is_newer_than(config1));
+    
+    // Higher version, same term
+    config2.config_version = 2;
+    EXPECT_TRUE(config2.is_newer_than(config1));
+    EXPECT_FALSE(config1.is_newer_than(config2));
+    
+    // Lower version, higher term (term wins)
+    config1.config_term = 10;
+    config2.config_term = 5;
+    config2.config_version = 10;
+    EXPECT_TRUE(config1.is_newer_than(config2));
+    EXPECT_FALSE(config2.is_newer_than(config1));
+}
+
+TEST_F(RaftSafetyValidatorTest, SingleNodeConfigurationChanges) {
+    NodeConfiguration original = repl_state->parse_node_configuration(three_node_config);
+    ASSERT_EQ(3, original.total_nodes());
+    
+    // Test single node addition
+    NodeConfiguration with_hostname = original.create_single_node_change("node4.example.com:8107:8108", "", 1);
+    EXPECT_EQ(4, with_hostname.total_nodes());
+    EXPECT_TRUE(original.is_safe_single_node_change(with_hostname));
+    
+    // Test single node removal
+    NodeConfiguration without_node = original.create_single_node_change("", "node2.example.com:8107:8108", 1);
+    EXPECT_EQ(2, without_node.total_nodes());
+    EXPECT_TRUE(original.is_safe_single_node_change(without_node));
+    
+    // Test unsafe: no change
+    NodeConfiguration no_change = original;
+    no_change.config_version++;
+    EXPECT_FALSE(original.is_safe_single_node_change(no_change));
+}
+
+TEST_F(RaftSafetyValidatorTest, EnhancedSymmetricDifferenceValidation) {
+    NodeConfiguration base = repl_state->parse_node_configuration(three_node_config);
+    
+    // Single addition (symmetric difference = 1) - should be valid
+    NodeConfiguration add_one = base;
+    add_one.hostname_nodes.push_back("node4.example.com:8107:8108");
+    EXPECT_TRUE(base.is_safe_single_node_change(add_one));
+    
+    // Single removal (symmetric difference = 1) - should be valid
+    NodeConfiguration remove_one = base;
+    remove_one.hostname_nodes.pop_back();
+    EXPECT_TRUE(base.is_safe_single_node_change(remove_one));
+    
+    // Node replacement (symmetric difference = 2) - should be invalid
+    NodeConfiguration replace_node = base;
+    replace_node.hostname_nodes.pop_back(); // Remove last
+    replace_node.hostname_nodes.push_back("replacement.example.com:8107:8108"); // Add different
+    EXPECT_FALSE(base.is_safe_single_node_change(replace_node));
+    
+    // Multiple additions (symmetric difference > 1) - should be invalid
+    NodeConfiguration add_multiple = base;
+    add_multiple.hostname_nodes.push_back("node4.example.com:8107:8108");
+    add_multiple.hostname_nodes.push_back("node5.example.com:8107:8108");
+    EXPECT_FALSE(base.is_safe_single_node_change(add_multiple));
+}
+
+TEST_F(RaftSafetyValidatorTest, ForceReconfigurationVersionComparison) {
+    NodeConfiguration base = repl_state->parse_node_configuration(three_node_config);
+    
+    // Test force reconfig (term = -1) vs normal config
+    NodeConfiguration force_config = base;
+    force_config.config_term = -1; // Uninitialized/force reconfig
+    force_config.config_version = 20;
+    
+    NodeConfiguration normal_config = base;
+    normal_config.config_term = 10; // High term
+    normal_config.config_version = 15; // Lower version
+    
+    EXPECT_TRUE(force_config.is_newer_than(normal_config))
+        << "Force reconfig with higher version should win against any term";
+    EXPECT_FALSE(normal_config.is_newer_than(force_config))
+        << "Normal config should lose to force reconfig with higher version";
+    
+    // Both force reconfigs - version-only comparison
+    NodeConfiguration force_config2 = base;
+    force_config2.config_term = -1;
+    force_config2.config_version = 30;
+    
+    EXPECT_TRUE(force_config2.is_newer_than(force_config))
+        << "Among force reconfigs, higher version should win";
+}
+
+TEST_F(RaftSafetyValidatorTest, MixedNodeTypeConfigurationChanges) {
+    NodeConfiguration mixed = repl_state->parse_node_configuration(mixed_config);
+    ASSERT_EQ(2, mixed.hostname_nodes.size());
+    ASSERT_EQ(1, mixed.ip_nodes.size());
+    
+    // Add hostname to mixed config
+    NodeConfiguration add_hostname = mixed;
+    add_hostname.hostname_nodes.push_back("node4.example.com:8107:8108");
+    EXPECT_TRUE(mixed.is_safe_single_node_change(add_hostname));
+    
+    // Add IP to mixed config
+    NodeConfiguration add_ip = mixed;
+    add_ip.ip_nodes.push_back("192.168.1.20:8107:8108");
+    EXPECT_TRUE(mixed.is_safe_single_node_change(add_ip));
+    
+    // Cross-type replacement (hostname -> IP) should be invalid
+    NodeConfiguration cross_replace = mixed;
+    cross_replace.hostname_nodes.pop_back(); // Remove hostname
+    cross_replace.ip_nodes.push_back("192.168.1.30:8107:8108"); // Add IP
+    EXPECT_FALSE(mixed.is_safe_single_node_change(cross_replace));
+}
+
+TEST_F(RaftSafetyValidatorTest, NodeConfigurationEdgeCases) {
+    // Empty to single node (bootstrap scenario)
+    NodeConfiguration empty = repl_state->parse_node_configuration("");
+    NodeConfiguration single = repl_state->parse_node_configuration("node1.example.com:8107:8108");
+    EXPECT_TRUE(empty.is_safe_single_node_change(single));
+    
+    // Single to empty (should be valid for single node removal)
+    EXPECT_TRUE(single.is_safe_single_node_change(empty));
+    
+    // Large cluster single change
+    std::vector<std::string> many_nodes;
+    for (int i = 1; i <= 10; ++i) {
+        many_nodes.push_back("node" + std::to_string(i) + ".example.com:8107:8108");
+    }
+    std::string large_config = StringUtils::join(many_nodes, ",");
+    NodeConfiguration large = repl_state->parse_node_configuration(large_config);
+    
+    NodeConfiguration large_plus_one = large;
+    large_plus_one.hostname_nodes.push_back("node11.example.com:8107:8108");
+    EXPECT_TRUE(large.is_safe_single_node_change(large_plus_one));
+}
+
+TEST_F(RaftSafetyValidatorTest, NodeConfigurationPerformance) {
+    NodeConfiguration base = repl_state->parse_node_configuration(three_node_config);
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    const int num_operations = 1000;
+    for (int i = 0; i < num_operations; ++i) {
+        std::string node_name = "perfnode" + std::to_string(i) + ":8107:8108";
+        
+        // Create change
+        NodeConfiguration new_config = base.create_single_node_change(node_name, "", 1);
+        
+        // Validate safety
+        bool is_safe = base.is_safe_single_node_change(new_config);
+        EXPECT_TRUE(is_safe);
+        
+        // Check version comparison
+        bool is_newer = new_config.is_newer_than(base);
+        EXPECT_TRUE(is_newer);
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    
+    // Should complete operations quickly (less than 100ms for 1000 operations)
+    EXPECT_LT(duration.count(), 100000) << "Config operations took: " << duration.count() << "μs";
+    
+    double avg_time_per_op = static_cast<double>(duration.count()) / num_operations;
+    EXPECT_LT(avg_time_per_op, 100.0) << "Average time per operation: " << avg_time_per_op << "μs";
 } 
