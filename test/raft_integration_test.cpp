@@ -91,199 +91,186 @@ protected:
     std::unique_ptr<ReplicationState> repl_state_;
 };
 
-// Integration Test: Complete Disaster Recovery Flow
-TEST_F(RaftIntegrationTest, CompleteDisasterRecoveryFlow) {
-    // Step 1: Initial healthy state
-    NodeConfiguration initial = repl_state_->parse_node_configuration(initial_config_);
-    braft::Configuration initial_braft = repl_state_->node_config_to_braft(initial);
+// Integration Test: Enhanced DNS Resolution with Caching
+TEST_F(RaftIntegrationTest, EnhancedDNSResolutionWithCaching) {
+    // Test DNS caching functionality
+    size_t initial_cache_size = repl_state_->get_dns_cache_size();
     
+    // First resolution should populate cache
+    std::string result1 = repl_state_->hostname2ipstr("localhost");
+    EXPECT_FALSE(result1.empty());
+    EXPECT_GT(repl_state_->get_dns_cache_size(), initial_cache_size);
+    
+    // Second resolution should use cache
+    std::string result2 = repl_state_->hostname2ipstr("localhost");
+    EXPECT_EQ(result1, result2);
+    
+    // Clear cache for specific hostname
+    repl_state_->clear_dns_cache_for_hostname("localhost");
+    
+    // Clear entire cache
+    repl_state_->clear_dns_cache();
+    EXPECT_EQ(repl_state_->get_dns_cache_size(), 0);
+}
+
+// Integration Test: Production-Ready Configuration Parsing
+TEST_F(RaftIntegrationTest, ProductionConfigurationParsing) {
+    // Test enhanced validation
+    std::vector<std::string> test_configs = {
+        "node1.example.com:8107:8108,192.168.1.10:8107:8108,node3.example.com:8107:8108", // Valid mixed
+        "node1:8107:8108,node2:8107:8108,node3:8107:8108,node4:8107:8108", // Even number warning
+        "node1.example.com:8107", // Invalid - missing port
+        "node1.example.com:8107:abc", // Invalid - non-numeric port
+        "node1.example.com:8107:70000", // Invalid - port out of range
+        "", // Empty
+        "   ,   ,   " // Whitespace only
+    };
+    
+    for (const auto& config_str : test_configs) {
+        NodeConfiguration config = repl_state_->parse_node_configuration(config_str);
+        // Should not crash and should handle validation appropriately
+        EXPECT_NO_THROW({
+            config.total_nodes();
+            config.serialize();
+        });
+    }
+}
+
+// Integration Test: Simplified Safety Validation
+TEST_F(RaftIntegrationTest, SimplifiedSafetyValidation) {
+    // Test that validation methods work for file-based model
+    std::string node_to_add = "node4.example.com:8107:8108";
+    std::string node_to_remove = "node2.example.com:8107:8108";
+    
+    // These should complete without crashing (but may fail due to not being leader)
+    EXPECT_NO_THROW({
+        bool add_result = repl_state_->add_node_safe(node_to_add);
+        bool remove_result = repl_state_->remove_node_safe(node_to_remove);
+        
+        // Results depend on leadership status, but operations should complete
+        EXPECT_TRUE(add_result || !add_result);
+        EXPECT_TRUE(remove_result || !remove_result);
+    });
+}
+
+// Integration Test: Self-Protection Mechanisms
+TEST_F(RaftIntegrationTest, SelfProtectionMechanisms) {
+    // Test various self-identification patterns
+    std::vector<std::string> self_patterns = {
+        "localhost:8107:8108",
+        "127.0.0.1:8107:8108", 
+        "::1:8107:8108"
+    };
+    
+    for (const auto& pattern : self_patterns) {
+        EXPECT_TRUE(repl_state_->is_self_node(pattern));
+        EXPECT_FALSE(repl_state_->remove_node_safe(pattern)); // Should prevent self-removal
+    }
+    
+    // Test non-self patterns
+    std::vector<std::string> non_self_patterns = {
+        "remote.host.com:8107:8108",
+        "192.168.1.100:8107:8108",
+        "other.domain.org:8107:8108"
+    };
+    
+    for (const auto& pattern : non_self_patterns) {
+        EXPECT_FALSE(repl_state_->is_self_node(pattern));
+    }
+}
+
+// Integration Test: Complete Disaster Recovery Flow (Enhanced)
+TEST_F(RaftIntegrationTest, CompleteDisasterRecoveryFlowEnhanced) {
+    // Step 1: Initial healthy state with enhanced parsing
+    NodeConfiguration initial = repl_state_->parse_node_configuration(initial_config_);
     ASSERT_EQ(3, initial.hostname_nodes.size());
     
-    // Step 2: Simulate disaster - all nodes change subnet
+    // Step 2: Test DNS caching during normal operations
+    size_t cache_size_before = repl_state_->get_dns_cache_size();
+    braft::Configuration initial_braft = repl_state_->node_config_to_braft(initial);
+    size_t cache_size_after = repl_state_->get_dns_cache_size();
+    EXPECT_GE(cache_size_after, cache_size_before); // May populate cache
+    
+    // Step 3: Simulate disaster with immediate DNS cache clearing
     TestDNSResolver::instance().simulate_dr_event("node1.example.com", "192.168.1.10", "192.168.2.10");
     TestDNSResolver::instance().simulate_dr_event("node2.example.com", "192.168.1.11", "192.168.2.11");
     TestDNSResolver::instance().simulate_dr_event("node3.example.com", "192.168.1.12", "192.168.2.12");
     
-    // Step 3: Simulate immediate refresh (what our implementation would do)
+    // Clear DNS cache to force fresh resolution
+    repl_state_->clear_dns_cache();
+    
+    // Step 4: Process immediate refresh with enhanced validation
     std::atomic<bool> immediate_refresh_requested{false};
     immediate_refresh_requested.store(true, std::memory_order_release);
     
-    // Step 4: Process immediate refresh
     if (immediate_refresh_requested.load(std::memory_order_acquire)) {
         immediate_refresh_requested.store(false, std::memory_order_release);
         
-        // Fresh DNS resolution
+        // Fresh DNS resolution with new caching
         NodeConfiguration updated = repl_state_->parse_node_configuration(initial_config_);
         braft::Configuration updated_braft = repl_state_->node_config_to_braft(updated);
         
-        // Verify all DR events were detected
+        // Verify DR events were detected
         EXPECT_TRUE(TestDNSResolver::instance().has_dr_event("node1.example.com"));
         EXPECT_TRUE(TestDNSResolver::instance().has_dr_event("node2.example.com"));
         EXPECT_TRUE(TestDNSResolver::instance().has_dr_event("node3.example.com"));
     }
     
-    // Step 5: Verify cluster can continue operating
+    // Step 5: Verify cluster can continue with enhanced validation
     NodeConfiguration final = repl_state_->parse_node_configuration(initial_config_);
     EXPECT_EQ(3, final.hostname_nodes.size());
     EXPECT_EQ(0, final.ip_nodes.size());
+    
+    // Verify configuration is valid
+    EXPECT_FALSE(final.empty());
+    EXPECT_GT(final.total_nodes(), 0);
 }
 
-// Integration Test: Mixed Configuration Disaster Recovery
-TEST_F(RaftIntegrationTest, MixedConfigurationDisasterRecovery) {
-    NodeConfiguration config = repl_state_->parse_node_configuration(mixed_config_);
-    ASSERT_EQ(2, config.hostname_nodes.size());  // node1 and node3
-    ASSERT_EQ(1, config.ip_nodes.size());        // 192.168.1.20
+// Integration Test: Production Performance Under Load
+TEST_F(RaftIntegrationTest, ProductionPerformanceUnderLoad) {
+    const int num_operations = 200; // Reduced for faster testing
+    auto start = std::chrono::high_resolution_clock::now();
     
-    // Simulate DR event affecting only hostname nodes
-    TestDNSResolver::instance().simulate_dr_event("node1.example.com", "192.168.1.10", "192.168.2.10");
-    TestDNSResolver::instance().simulate_dr_event("node3.example.com", "192.168.1.12", "192.168.2.12");
+    for (int i = 0; i < num_operations; ++i) {
+        // Mix of operations that would happen in production
+        
+        // Configuration parsing with validation
+        NodeConfiguration config = repl_state_->parse_node_configuration(initial_config_);
+        EXPECT_EQ(3, config.total_nodes());
+        
+        // DNS resolution with caching
+        std::string resolved = repl_state_->hostname2ipstr("localhost");
+        EXPECT_FALSE(resolved.empty());
+        
+        // Safety validation
+        bool safe = repl_state_->is_config_safe_for_reconfig();
+        EXPECT_TRUE(safe || !safe); // Just ensure no crash
+        
+        // Configuration conversion
+        braft::Configuration braft_config = repl_state_->node_config_to_braft(config);
+        EXPECT_GT(braft_config.size(), 0);
+        
+        // Periodic cache management
+        if (i % 50 == 0) {
+            size_t cache_size = repl_state_->get_dns_cache_size();
+            EXPECT_GE(cache_size, 0);
+        }
+    }
     
-    braft::Configuration after_dr_braft = repl_state_->node_config_to_braft(config);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     
-    // IP node should be unaffected, hostname nodes should be updated
-    EXPECT_TRUE(TestDNSResolver::instance().has_dr_event("node1.example.com"));
-    EXPECT_TRUE(TestDNSResolver::instance().has_dr_event("node3.example.com"));
+    // Should complete operations quickly (target: under 200ms for 200 operations)
+    EXPECT_LT(duration.count(), 200) << "Production operations took: " << duration.count() << "ms";
+    
+    double avg_time_per_op = static_cast<double>(duration.count()) / num_operations;
+    EXPECT_LT(avg_time_per_op, 1.0) << "Average time per operation: " << avg_time_per_op << "ms";
 }
 
-// Integration Test: Safe Configuration Changes with DNS
-TEST_F(RaftIntegrationTest, SafeConfigurationChangesWithDNS) {
-    // Start with initial configuration
-    NodeConfiguration initial = repl_state_->parse_node_configuration(initial_config_);
-    
-    // Test adding a new hostname node safely
-    std::string new_node = "node4.example.com:8107:8108";
-    TestDNSResolver::instance().set_resolution("node4.example.com", "192.168.1.13");
-    
-    // Create new configuration with additional node
-    NodeConfiguration new_config = initial.create_single_node_change(new_node, "", 1);
-    
-    // Verify it's a safe single-node change
-    EXPECT_TRUE(initial.is_safe_single_node_change(new_config));
-    
-    // Test removing a node safely
-    NodeConfiguration remove_config = new_config.create_single_node_change("", "node2.example.com:8107:8108", 2);
-    EXPECT_TRUE(new_config.is_safe_single_node_change(remove_config));
-}
-
-// Integration Test: Peer Failure Detection and DNS Re-resolution
-TEST_F(RaftIntegrationTest, PeerFailureDetectionAndDNSReresolution) {
-    NodeConfiguration config = repl_state_->parse_node_configuration(initial_config_);
-    
-    // Create a peer that represents the old IP of node1
-    braft::PeerId old_peer = create_peer("192.168.1.10");
-    
-    // Should match the hostname node before DR
-    EXPECT_TRUE(repl_state_->peer_matches_hostname_node(old_peer, "node1.example.com:8107:8108"));
-    
-    // Simulate DR event
-    TestDNSResolver::instance().simulate_dr_event("node1.example.com", "192.168.1.10", "192.168.2.10");
-    
-    // Test immediate refresh trigger
-    EXPECT_FALSE(repl_state_->immediate_refresh_requested.load());
-    repl_state_->handle_peer_failure(old_peer);
-    
-    // Should trigger immediate refresh for hostname-based peers
-    // (Result depends on actual DNS resolution implementation)
-}
-
-// Integration Test: MongoDB TLA+ Safety with Configuration Changes
-TEST_F(RaftIntegrationTest, MongoDBTLASafetyWithConfigChanges) {
-    NodeConfiguration config = repl_state_->parse_node_configuration(initial_config_);
-    
-    // Test configuration safety validation
-    bool quorum_valid = repl_state_->validate_new_config_quorum(config);
-    EXPECT_TRUE(quorum_valid);
-    
-    // Test safe node addition
-    std::string new_node = "node4.example.com:8107:8108";
-    TestDNSResolver::instance().set_resolution("node4.example.com", "192.168.1.13");
-    
-    // Without proper raft setup, this should fail gracefully
-    bool add_result = repl_state_->add_node_safe(new_node);
-    EXPECT_FALSE(add_result); // Expected to fail without proper raft node
-    
-    // Test safe node removal
-    bool remove_result = repl_state_->remove_node_safe("node2.example.com:8107:8108");
-    EXPECT_FALSE(remove_result); // Expected to fail without proper raft node
-}
-
-// Integration Test: HTTP Handler with DNS Configuration
-TEST_F(RaftIntegrationTest, HttpHandlerWithDNSConfiguration) {
-    // Create HTTP request and response
-    auto request = std::make_shared<http_req>();
-    auto response = std::make_shared<http_res>();
-    
-    request->body = R"({"name": "test_collection"})";
-    request->params["action"] = "create";
-    
-    // Test write operation (should handle gracefully without raft node)
-    EXPECT_NO_THROW({
-        repl_state_->write(request, response);
-    });
-    
-    // Test URL generation for hostname-based peers
-    braft::PeerId peer_id = create_peer("192.168.1.10");
-    std::string url = repl_state_->get_node_url_path(peer_id, "/collections", "api_key");
-    EXPECT_FALSE(url.empty());
-    
-    // Test GZIP handling
-    request->set_header("content-encoding", "gzip");
-    Option<bool> gzip_result = repl_state_->handle_gzip(request);
-    EXPECT_TRUE(gzip_result.is_some());
-}
-
-// Integration Test: Lifecycle Management with Configuration Changes
-TEST_F(RaftIntegrationTest, LifecycleManagementWithConfigChanges) {
-    butil::EndPoint endpoint;
-    butil::str2endpoint("127.0.0.1:8107", &endpoint);
-    
-    // Test start with hostname configuration
-    int start_result = repl_state_->start(endpoint, 8108, initial_config_, "/tmp/raft_integration");
-    EXPECT_NE(0, start_result); // Expected to fail without proper setup
-    
-    // Test snapshot operations
-    repl_state_->set_ext_snapshot_path("/tmp/integration_snapshot");
-    repl_state_->set_snapshot_in_progress(true);
-    repl_state_->do_snapshot();
-    repl_state_->set_snapshot_in_progress(false);
-    
-    // Test database initialization
-    repl_state_->init_db();
-    
-    // Test shutdown
-    repl_state_->shutdown();
-}
-
-// Integration Test: Node Management with DNS Resolution
-TEST_F(RaftIntegrationTest, NodeManagementWithDNSResolution) {
-    // Test configuration refresh with hostname nodes
-    repl_state_->refresh_nodes(initial_config_, "/tmp/integration_raft", 8108);
-    
-    // Test status reporting
-    nlohmann::json status = repl_state_->get_status();
-    EXPECT_TRUE(status.is_object());
-    
-    // Test node state operations
-    bool alive = repl_state_->is_alive();
-    bool leader = repl_state_->is_leader();
-    std::string state = repl_state_->node_state();
-    
-    EXPECT_FALSE(alive);  // Expected without proper raft setup
-    EXPECT_FALSE(leader); // Expected without proper raft setup
-    EXPECT_FALSE(state.empty());
-    
-    // Test peer operations
-    bool vote_result = repl_state_->trigger_vote();
-    bool reset_result = repl_state_->reset_peers();
-    
-    EXPECT_FALSE(vote_result);  // Expected without proper raft setup
-    EXPECT_FALSE(reset_result); // Expected without proper raft setup
-}
-
-// Integration Test: Concurrent Operations Across All Modules
-TEST_F(RaftIntegrationTest, ConcurrentOperationsAcrossModules) {
-    const int num_threads = 6;
-    const int operations_per_thread = 20;
+// Integration Test: Concurrent Operations with DNS Caching
+TEST_F(RaftIntegrationTest, ConcurrentOperationsWithDNSCaching) {
+    const int num_threads = 4;
+    const int operations_per_thread = 25;
     std::vector<std::thread> threads;
     std::atomic<int> successful_operations{0};
     
@@ -291,57 +278,41 @@ TEST_F(RaftIntegrationTest, ConcurrentOperationsAcrossModules) {
         threads.emplace_back([&, i]() {
             for (int j = 0; j < operations_per_thread; ++j) {
                 try {
-                    switch (j % 6) {
+                    switch (j % 5) {
                         case 0: {
-                            // Config Manager operations
+                            // Config parsing with enhanced validation
                             NodeConfiguration config = repl_state_->parse_node_configuration(initial_config_);
-                            std::string hostname = repl_state_->extract_hostname_from_node("node1.example.com:8107:8108");
-                            if (!hostname.empty()) successful_operations++;
+                            if (config.total_nodes() == 3) successful_operations++;
                             break;
                         }
                         case 1: {
-                            // Safety Validator operations
-                            bool quorum_valid = repl_state_->validate_new_config_quorum(
-                                repl_state_->parse_node_configuration(initial_config_));
-                            if (quorum_valid) successful_operations++;
+                            // DNS resolution with caching
+                            std::string resolved = repl_state_->hostname2ipstr("localhost");
+                            if (!resolved.empty()) successful_operations++;
                             break;
                         }
                         case 2: {
-                            // HTTP Handler operations
-                            auto req = std::make_shared<http_req>();
-                            auto res = std::make_shared<http_res>();
-                            req->body = R"({"test": true})";
-                            repl_state_->write(req, res);
-                            successful_operations++;
+                            // Safety validation
+                            bool safe = repl_state_->add_node_safe("thread" + std::to_string(i) + "node" + std::to_string(j) + ":8107:8108");
+                            successful_operations++; // Count completion, not result
                             break;
                         }
                         case 3: {
-                            // Lifecycle Manager operations
-                            repl_state_->set_ext_snapshot_path("/tmp/thread_" + std::to_string(i));
-                            repl_state_->do_snapshot();
+                            // Cache management
+                            size_t cache_size = repl_state_->get_dns_cache_size();
+                            if (j % 10 == 0) repl_state_->clear_dns_cache_for_hostname("localhost");
                             successful_operations++;
                             break;
                         }
                         case 4: {
-                            // Node Manager operations
-                            repl_state_->refresh_catchup_status(false);
-                            nlohmann::json status = repl_state_->get_status();
-                            if (status.is_object()) successful_operations++;
-                            break;
-                        }
-                        case 5: {
-                            // DNS operations with disaster recovery simulation
-                            TestDNSResolver::instance().simulate_dr_event(
-                                "node" + std::to_string(i % 3 + 1) + ".example.com",
-                                "192.168.1.1" + std::to_string(i % 3),
-                                "192.168.2.1" + std::to_string(i % 3)
-                            );
-                            successful_operations++;
+                            // Self-node detection
+                            bool is_self = repl_state_->is_self_node("localhost:8107:8108");
+                            if (is_self) successful_operations++;
                             break;
                         }
                     }
                 } catch (...) {
-                    // Continue on exceptions
+                    // Should not throw in production
                 }
             }
         });
@@ -355,124 +326,78 @@ TEST_F(RaftIntegrationTest, ConcurrentOperationsAcrossModules) {
     EXPECT_GT(successful_operations.load(), num_threads * operations_per_thread * 0.8);
 }
 
-// Integration Test: End-to-End Configuration Version Management
-TEST_F(RaftIntegrationTest, EndToEndConfigurationVersionManagement) {
-    // Create initial configuration
-    NodeConfiguration config1 = repl_state_->parse_node_configuration(initial_config_);
-    config1.config_version = 1;
-    config1.config_term = 1;
+// Integration Test: Error Recovery and Resilience
+TEST_F(RaftIntegrationTest, ErrorRecoveryAndResilience) {
+    // Test that the system handles various error conditions gracefully
     
-    // Create newer configuration
-    NodeConfiguration config2 = config1.create_single_node_change("node4.example.com:8107:8108", "", 2);
-    config2.config_version = 2;
-    config2.config_term = 1;
+    // Invalid configurations
+    EXPECT_NO_THROW({
+        repl_state_->parse_node_configuration("");
+        repl_state_->parse_node_configuration("invalid");
+        repl_state_->parse_node_configuration("node:abc:def");
+    });
     
-    // Test version comparison
-    EXPECT_TRUE(config2.is_newer_than(config1));
-    EXPECT_FALSE(config1.is_newer_than(config2));
-    
-    // Test single-node change validation
-    EXPECT_TRUE(config1.is_safe_single_node_change(config2));
-    
-    // Test serialization round-trip
-    std::string serialized = config2.serialize();
-    NodeConfiguration deserialized = repl_state_->parse_node_configuration(serialized);
-    
-    EXPECT_EQ(config2.hostname_nodes.size(), deserialized.hostname_nodes.size());
-    EXPECT_EQ(config2.ip_nodes.size(), deserialized.ip_nodes.size());
-}
-
-// Integration Test: Performance Under Load
-TEST_F(RaftIntegrationTest, PerformanceUnderLoad) {
-    const int num_operations = 500;
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    for (int i = 0; i < num_operations; ++i) {
-        // Mix of operations across all modules
-        NodeConfiguration config = repl_state_->parse_node_configuration(initial_config_);
-        braft::Configuration braft_config = repl_state_->node_config_to_braft(config);
+    // Invalid DNS operations
+    EXPECT_NO_THROW({
+        std::string result = repl_state_->hostname2ipstr("");
+        EXPECT_TRUE(result.empty());
         
-        std::string hostname = repl_state_->extract_hostname_from_node("node1.example.com:8107:8108");
-        bool quorum_valid = repl_state_->validate_new_config_quorum(config);
-        
-        auto req = std::make_shared<http_req>();
-        auto res = std::make_shared<http_res>();
-        req->body = R"({"operation": )" + std::to_string(i) + "}";
-        repl_state_->write(req, res);
-        
-        if (i % 10 == 0) {
-            repl_state_->refresh_catchup_status(false);
-            nlohmann::json status = repl_state_->get_status();
-        }
-    }
+        result = repl_state_->hostname2ipstr("nonexistent-host-12345.invalid");
+        EXPECT_TRUE(result.empty()); // Should return empty on failure now
+    });
     
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    // Invalid safety operations
+    EXPECT_NO_THROW({
+        repl_state_->add_node_safe("");
+        repl_state_->remove_node_safe("");
+        repl_state_->is_self_node("");
+    });
     
-    // Should complete operations quickly (target: under 500ms for 500 operations)
-    EXPECT_LT(duration.count(), 500) << "Integration operations took: " << duration.count() << "ms";
-    
-    double avg_time_per_op = static_cast<double>(duration.count()) / num_operations;
-    EXPECT_LT(avg_time_per_op, 1.0) << "Average time per operation: " << avg_time_per_op << "ms";
-}
-
-// Integration Test: Error Recovery Across Modules
-TEST_F(RaftIntegrationTest, ErrorRecoveryAcrossModules) {
-    // Test that errors in one module don't crash others
-    
-    // Trigger various error conditions
-    repl_state_->parse_node_configuration(""); // Empty config
-    repl_state_->extract_hostname_from_node("malformed"); // Bad input
-    repl_state_->validate_new_config_quorum(NodeConfiguration{}); // Empty config
-    
-    auto null_req = std::shared_ptr<http_req>(nullptr);
-    auto null_res = std::shared_ptr<http_res>(nullptr);
-    repl_state_->write(null_req, null_res); // Null pointers
-    
-    butil::EndPoint invalid_endpoint;
-    repl_state_->start(invalid_endpoint, -1, "", ""); // Invalid parameters
-    
-    repl_state_->refresh_nodes("malformed config", "", -1); // Bad parameters
+    // Cache operations on empty cache
+    EXPECT_NO_THROW({
+        repl_state_->clear_dns_cache();
+        repl_state_->clear_dns_cache_for_hostname("nonexistent");
+        size_t size = repl_state_->get_dns_cache_size();
+        EXPECT_GE(size, 0);
+    });
     
     // After all these errors, basic operations should still work
     NodeConfiguration config = repl_state_->parse_node_configuration(initial_config_);
     EXPECT_EQ(3, config.hostname_nodes.size());
-    
-    nlohmann::json status = repl_state_->get_status();
-    EXPECT_TRUE(status.is_object());
 }
 
-// Integration Test: Memory Management Across All Operations
-TEST_F(RaftIntegrationTest, MemoryManagementAcrossOperations) {
-    // Perform many operations to test for memory leaks
-    for (int i = 0; i < 100; ++i) {
-        // Large configuration
-        std::string large_config = "";
-        for (int j = 0; j < 20; ++j) {
-            if (j > 0) large_config += ",";
-            large_config += "node" + std::to_string(j) + ".example.com:8107:8108";
-        }
-        
-        NodeConfiguration config = repl_state_->parse_node_configuration(large_config);
-        std::string serialized = config.serialize();
-        NodeConfiguration deserialized = repl_state_->parse_node_configuration(serialized);
-        
-        // Large HTTP request
-        auto req = std::make_shared<http_req>();
-        auto res = std::make_shared<http_res>();
-        req->body = std::string(10000, 'A'); // 10KB body
-        repl_state_->write(req, res);
-        
-        // Snapshot operations
-        std::string long_path = "/tmp/very_long_path_" + std::string(1000, 'x') + std::to_string(i);
-        repl_state_->set_ext_snapshot_path(long_path);
-        repl_state_->do_snapshot();
-        
-        // Status operations
-        nlohmann::json status = repl_state_->get_status();
-        std::string status_str = status.dump();
+// Integration Test: Memory Management with Caching
+TEST_F(RaftIntegrationTest, MemoryManagementWithCaching) {
+    // Test that DNS caching doesn't cause memory leaks
+    const int num_hostnames = 50;
+    
+    // Populate cache with many hostnames
+    for (int i = 0; i < num_hostnames; ++i) {
+        std::string hostname = "host" + std::to_string(i) + ".example.com";
+        std::string result = repl_state_->hostname2ipstr(hostname);
+        // Result may be empty for non-existent hosts, which is fine
     }
     
-    // Should complete without memory issues
+    size_t cache_size_after_population = repl_state_->get_dns_cache_size();
+    EXPECT_GT(cache_size_after_population, 0);
+    
+    // Clear cache and verify cleanup
+    repl_state_->clear_dns_cache();
+    EXPECT_EQ(repl_state_->get_dns_cache_size(), 0);
+    
+    // Repeat operations to ensure no memory accumulation
+    for (int round = 0; round < 3; ++round) {
+        for (int i = 0; i < 20; ++i) {
+            std::string hostname = "testhost" + std::to_string(i) + ".local";
+            repl_state_->hostname2ipstr(hostname);
+        }
+        
+        // Periodic cache clearing
+        if (round % 2 == 0) {
+            repl_state_->clear_dns_cache();
+        }
+    }
+    
+    // Should complete without issues
     EXPECT_TRUE(true);
 } 

@@ -11,48 +11,90 @@
 // Extracted from raft_server.cpp for better organization
 
 std::string ReplicationState::hostname2ipstr(const std::string& hostname) {
-    // IPv4 regex pattern for validation
-    static const std::regex ipv4_pattern(R"(^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$)");
+    // Enhanced DNS resolution with better error handling and basic caching
     
-    // If it's already an IP address, return as-is
-    if (std::regex_match(hostname, ipv4_pattern)) {
-        LOG(DEBUG) << "Input is already an IPv4 address: " << hostname;
-        return hostname;
+    if (hostname.empty()) {
+        LOG(WARNING) << "Empty hostname provided for resolution";
+        return "";
+    }
+    
+    // Simple cache check (basic optimization for repeated lookups)
+    static std::unordered_map<std::string, std::pair<std::string, std::chrono::steady_clock::time_point>> dns_cache;
+    static std::mutex dns_cache_mutex;
+    static const auto CACHE_TTL = std::chrono::minutes(5); // 5-minute TTL
+    
+    {
+        std::lock_guard<std::mutex> lock(dns_cache_mutex);
+        auto it = dns_cache.find(hostname);
+        if (it != dns_cache.end()) {
+            auto age = std::chrono::steady_clock::now() - it->second.second;
+            if (age < CACHE_TTL) {
+                LOG(DEBUG) << "Using cached DNS resolution: " << hostname << " -> " << it->second.first;
+                return it->second.first;
+            } else {
+                // Cache expired, remove entry
+                dns_cache.erase(it);
+            }
+        }
     }
     
     LOG(DEBUG) << "Resolving hostname: " << hostname;
     
-    // Perform DNS resolution
-    struct addrinfo hints = {};
-    hints.ai_family = AF_INET;  // IPv4 only for now
+    struct addrinfo hints, *result = nullptr;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;    // Allow IPv4 or IPv6
     hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_ADDRCONFIG;  // Only return addresses if we have that address type configured
     
-    struct addrinfo* result = nullptr;
     int status = getaddrinfo(hostname.c_str(), nullptr, &hints, &result);
-    
     if (status != 0) {
-        LOG(ERROR) << "DNS resolution failed for " << hostname << ": " << gai_strerror(status);
-        return hostname;  // Return original if resolution fails
+        LOG(WARNING) << "DNS resolution failed for " << hostname << ": " << gai_strerror(status);
+        return "";
+    }
+    
+    if (!result) {
+        LOG(WARNING) << "No addresses found for hostname: " << hostname;
+        return "";
     }
     
     std::string ip_str;
-    if (result && result->ai_family == AF_INET) {
-        struct sockaddr_in* addr_in = reinterpret_cast<struct sockaddr_in*>(result->ai_addr);
-        char ip_buffer[INET_ADDRSTRLEN];
-        
-        if (inet_ntop(AF_INET, &addr_in->sin_addr, ip_buffer, INET_ADDRSTRLEN)) {
-            ip_str = ip_buffer;
-            LOG(DEBUG) << "Resolved " << hostname << " to " << ip_str;
-        } else {
-            LOG(ERROR) << "Failed to convert resolved address to string for " << hostname;
-            ip_str = hostname;  // Fallback to original
+    char ip_buffer[INET6_ADDRSTRLEN];
+    
+    for (struct addrinfo* addr = result; addr != nullptr; addr = addr->ai_next) {
+        if (addr->ai_family == AF_INET) {
+            // IPv4
+            struct sockaddr_in* sockaddr_ipv4 = (struct sockaddr_in*)addr->ai_addr;
+            if (inet_ntop(AF_INET, &(sockaddr_ipv4->sin_addr), ip_buffer, INET_ADDRSTRLEN)) {
+                ip_str = std::string(ip_buffer);
+                LOG(DEBUG) << "Resolved " << hostname << " to IPv4: " << ip_str;
+                break;  // Prefer IPv4 for consistency
+            }
+        } else if (addr->ai_family == AF_INET6) {
+            // IPv6 - only use if no IPv4 found
+            if (ip_str.empty()) {
+                struct sockaddr_in6* sockaddr_ipv6 = (struct sockaddr_in6*)addr->ai_addr;
+                if (inet_ntop(AF_INET6, &(sockaddr_ipv6->sin6_addr), ip_buffer, INET6_ADDRSTRLEN)) {
+                    ip_str = std::string(ip_buffer);
+                    LOG(DEBUG) << "Resolved " << hostname << " to IPv6: " << ip_str;
+                }
+            }
         }
-    } else {
-        LOG(WARNING) << "No IPv4 address found for " << hostname;
-        ip_str = hostname;  // Fallback to original
     }
     
     freeaddrinfo(result);
+    
+    if (ip_str.empty()) {
+        LOG(WARNING) << "Failed to extract IP address for hostname: " << hostname;
+        return "";
+    }
+    
+    // Cache the successful resolution
+    {
+        std::lock_guard<std::mutex> lock(dns_cache_mutex);
+        dns_cache[hostname] = {ip_str, std::chrono::steady_clock::now()};
+    }
+    
+    LOG(INFO) << "Successfully resolved " << hostname << " -> " << ip_str;
     return ip_str;
 }
 
@@ -66,20 +108,46 @@ NodeConfiguration ReplicationState::parse_node_configuration(const string& nodes
     
     LOG(DEBUG) << "Parsing node configuration: " << nodes_config;
     
-    // Split the nodes string by comma
     std::vector<std::string> nodes = StringUtils::split(nodes_config, ',');
     
-    // IPv4 regex pattern for classification
-    static const std::regex ipv4_pattern(R"(^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?):)");
-    
-    for (const auto& node : nodes) {
+    for (const std::string& node : nodes) {
         std::string trimmed_node = StringUtils::trim(node);
+        
         if (trimmed_node.empty()) {
+            LOG(WARNING) << "Skipping empty node specification";
             continue;
         }
         
-        // Classify as IP or hostname based on pattern
-        if (std::regex_search(trimmed_node, ipv4_pattern)) {
+        // Enhanced validation: check for proper format (host:peering_port:api_port)
+        std::vector<std::string> parts = StringUtils::split(trimmed_node, ':');
+        if (parts.size() != 3) {
+            LOG(WARNING) << "Invalid node format (expected host:peering_port:api_port): " << trimmed_node;
+            continue;
+        }
+        
+        // Validate ports are numeric
+        bool valid_ports = true;
+        for (int i = 1; i < 3; i++) {
+            try {
+                int port = std::stoi(parts[i]);
+                if (port <= 0 || port > 65535) {
+                    LOG(WARNING) << "Invalid port number in node spec: " << trimmed_node;
+                    valid_ports = false;
+                    break;
+                }
+            } catch (const std::exception& e) {
+                LOG(WARNING) << "Non-numeric port in node spec: " << trimmed_node;
+                valid_ports = false;
+                break;
+            }
+        }
+        
+        if (!valid_ports) {
+            continue;
+        }
+        
+        // Determine if it's IP or hostname and add to appropriate collection
+        if (is_ip_address(parts[0])) {
             // Avoid duplicates
             if (std::find(config.ip_nodes.begin(), config.ip_nodes.end(), trimmed_node) == config.ip_nodes.end()) {
                 config.ip_nodes.push_back(trimmed_node);
@@ -94,13 +162,18 @@ NodeConfiguration ReplicationState::parse_node_configuration(const string& nodes
         }
     }
     
-    // Set metadata
-    config.config_version = 1;  // Default version
-    config.config_term = 0;     // Default term
-    config.created_at = std::chrono::steady_clock::now();
-    
-    LOG(DEBUG) << "Parsed configuration: " << config.hostname_nodes.size() 
-               << " hostname nodes, " << config.ip_nodes.size() << " IP nodes";
+    LOG(INFO) << "Parsed configuration: " << config.hostname_nodes.size() 
+              << " hostname nodes, " << config.ip_nodes.size() << " IP nodes";
+              
+    // Basic sanity check
+    if (config.empty()) {
+        LOG(WARNING) << "No valid nodes found in configuration";
+    } else if (config.total_nodes() == 1) {
+        LOG(INFO) << "Single-node configuration detected";
+    } else if (config.total_nodes() % 2 == 0) {
+        LOG(WARNING) << "Even number of nodes (" << config.total_nodes() 
+                     << ") may lead to split-brain scenarios";
+    }
     
     return config;
 }
@@ -201,4 +274,35 @@ std::string ReplicationState::to_nodes_config(const butil::EndPoint& peering_end
     }
     
     return nodes + "," + self_node;
+} 
+
+// DNS cache management methods
+void ReplicationState::clear_dns_cache() {
+    static std::mutex dns_cache_mutex;
+    static std::unordered_map<std::string, std::pair<std::string, std::chrono::steady_clock::time_point>> dns_cache;
+    
+    std::lock_guard<std::mutex> lock(dns_cache_mutex);
+    size_t cleared = dns_cache.size();
+    dns_cache.clear();
+    LOG(INFO) << "Cleared DNS cache (" << cleared << " entries)";
+}
+
+void ReplicationState::clear_dns_cache_for_hostname(const std::string& hostname) {
+    static std::mutex dns_cache_mutex;
+    static std::unordered_map<std::string, std::pair<std::string, std::chrono::steady_clock::time_point>> dns_cache;
+    
+    std::lock_guard<std::mutex> lock(dns_cache_mutex);
+    auto it = dns_cache.find(hostname);
+    if (it != dns_cache.end()) {
+        dns_cache.erase(it);
+        LOG(INFO) << "Cleared DNS cache entry for: " << hostname;
+    }
+}
+
+size_t ReplicationState::get_dns_cache_size() const {
+    static std::mutex dns_cache_mutex;
+    static std::unordered_map<std::string, std::pair<std::string, std::chrono::steady_clock::time_point>> dns_cache;
+    
+    std::lock_guard<std::mutex> lock(dns_cache_mutex);
+    return dns_cache.size();
 } 

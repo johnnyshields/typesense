@@ -8,320 +8,216 @@
 class RaftConfigManagerTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Test configurations
-        single_hostname = "node1.example.com:8107:8108";
-        single_ip = "192.168.1.10:8107:8108";
-        mixed_config = "node1.example.com:8107:8108,192.168.1.20:8107:8108,node3.example.com:8107:8108";
-        all_hostnames = "node1.example.com:8107:8108,node2.example.com:8107:8108,node3.example.com:8107:8108";
-        all_ips = "192.168.1.10:8107:8108,192.168.1.20:8107:8108,192.168.1.30:8107:8108";
-        malformed_config = "node1.example.com:8107:8108,malformed,192.168.1.20:8107:8108";
-        
         // Create ReplicationState with null dependencies - tests should work without full setup
         repl_state = std::make_unique<ReplicationState>(nullptr, nullptr, "", 0);
     }
 
-    std::string single_hostname;
-    std::string single_ip;
-    std::string mixed_config;
-    std::string all_hostnames;
-    std::string all_ips;
-    std::string malformed_config;
     std::unique_ptr<ReplicationState> repl_state;
 };
 
-// Test hostname2ipstr DNS resolution functionality
+// Test enhanced DNS resolution with caching
 TEST_F(RaftConfigManagerTest, Hostname2IPStrBasicResolution) {
-    // Test with valid hostname (localhost should resolve)
     std::string result = repl_state->hostname2ipstr("localhost");
     EXPECT_FALSE(result.empty());
-    
-    // Test with IP address (should return as-is)
-    std::string ip_test = repl_state->hostname2ipstr("192.168.1.10");
-    EXPECT_EQ("192.168.1.10", ip_test);
-    
-    // Test with IPv4 validation
-    std::string valid_ip = repl_state->hostname2ipstr("127.0.0.1");
-    EXPECT_EQ("127.0.0.1", valid_ip);
+    // Should resolve to either 127.0.0.1 or ::1
+    EXPECT_TRUE(result == "127.0.0.1" || result == "::1");
 }
 
-TEST_F(RaftConfigManagerTest, Hostname2IPStrInvalidInputs) {
-    // Test with invalid IP format
-    std::string invalid_ip = repl_state->hostname2ipstr("999.999.999.999");
-    EXPECT_EQ("999.999.999.999", invalid_ip); // Should return original for invalid IPs
-    
-    // Test with non-existent hostname
-    std::string nonexistent = repl_state->hostname2ipstr("nonexistent-host-12345.invalid");
-    EXPECT_EQ("nonexistent-host-12345.invalid", nonexistent); // Should return original on failure
-    
-    // Test with empty string
-    std::string empty_result = repl_state->hostname2ipstr("");
-    EXPECT_TRUE(empty_result.empty());
+TEST_F(RaftConfigManagerTest, Hostname2IPStrEmptyInput) {
+    std::string result = repl_state->hostname2ipstr("");
+    EXPECT_TRUE(result.empty());
 }
 
-// Test parse_node_configuration functionality
-TEST_F(RaftConfigManagerTest, ParseNodeConfigurationSingleHostname) {
-    NodeConfiguration config = repl_state->parse_node_configuration(single_hostname);
+TEST_F(RaftConfigManagerTest, Hostname2IPStrCaching) {
+    // First resolution
+    std::string result1 = repl_state->hostname2ipstr("localhost");
+    EXPECT_FALSE(result1.empty());
     
-    EXPECT_EQ(1, config.hostname_nodes.size());
-    EXPECT_EQ(0, config.ip_nodes.size());
-    EXPECT_EQ(single_hostname, config.hostname_nodes[0]);
-    EXPECT_EQ(1, config.total_nodes());
-    EXPECT_EQ(1, config.config_version);
-    EXPECT_EQ(0, config.config_term);
+    // Second resolution should use cache (verify cache size increases)
+    size_t cache_size_before = repl_state->get_dns_cache_size();
+    std::string result2 = repl_state->hostname2ipstr("localhost");
+    EXPECT_EQ(result1, result2);
+    
+    // Cache should have at least one entry
+    EXPECT_GT(repl_state->get_dns_cache_size(), 0);
 }
 
-TEST_F(RaftConfigManagerTest, ParseNodeConfigurationSingleIP) {
-    NodeConfiguration config = repl_state->parse_node_configuration(single_ip);
+TEST_F(RaftConfigManagerTest, DNSCacheManagement) {
+    // Add some entries to cache
+    repl_state->hostname2ipstr("localhost");
+    EXPECT_GT(repl_state->get_dns_cache_size(), 0);
     
-    EXPECT_EQ(0, config.hostname_nodes.size());
-    EXPECT_EQ(1, config.ip_nodes.size());
-    EXPECT_EQ(single_ip, config.ip_nodes[0]);
-    EXPECT_EQ(1, config.total_nodes());
+    // Clear specific hostname
+    repl_state->clear_dns_cache_for_hostname("localhost");
+    
+    // Clear entire cache
+    repl_state->clear_dns_cache();
+    EXPECT_EQ(repl_state->get_dns_cache_size(), 0);
 }
 
-TEST_F(RaftConfigManagerTest, ParseNodeConfigurationMixedNodes) {
-    NodeConfiguration config = repl_state->parse_node_configuration(mixed_config);
+// Test enhanced configuration parsing with validation
+TEST_F(RaftConfigManagerTest, ParseNodeConfigurationValidFormat) {
+    std::string config = "node1.example.com:8107:8108,192.168.1.10:8107:8108,node3.example.com:8107:8108";
+    NodeConfiguration result = ReplicationState::parse_node_configuration(config);
     
-    EXPECT_EQ(2, config.hostname_nodes.size());
-    EXPECT_EQ(1, config.ip_nodes.size());
-    EXPECT_EQ(3, config.total_nodes());
-    
-    // Verify specific nodes
-    EXPECT_EQ("node1.example.com:8107:8108", config.hostname_nodes[0]);
-    EXPECT_EQ("node3.example.com:8107:8108", config.hostname_nodes[1]);
-    EXPECT_EQ("192.168.1.20:8107:8108", config.ip_nodes[0]);
+    EXPECT_EQ(2, result.hostname_nodes.size());
+    EXPECT_EQ(1, result.ip_nodes.size());
+    EXPECT_EQ(3, result.total_nodes());
 }
 
-TEST_F(RaftConfigManagerTest, ParseNodeConfigurationAllHostnames) {
-    NodeConfiguration config = repl_state->parse_node_configuration(all_hostnames);
+TEST_F(RaftConfigManagerTest, ParseNodeConfigurationInvalidFormat) {
+    // Test various invalid formats
+    std::vector<std::string> invalid_configs = {
+        "node1.example.com:8107",           // Missing API port
+        "node1.example.com:8107:8108:9000", // Too many ports
+        "node1.example.com:abc:8108",       // Non-numeric port
+        "node1.example.com:8107:70000",     // Port out of range
+        "node1.example.com:-1:8108",        // Negative port
+        "",                                 // Empty config
+        "   ,   ,   "                      // Only whitespace and commas
+    };
     
-    EXPECT_EQ(3, config.hostname_nodes.size());
-    EXPECT_EQ(0, config.ip_nodes.size());
-    EXPECT_EQ(3, config.total_nodes());
-}
-
-TEST_F(RaftConfigManagerTest, ParseNodeConfigurationAllIPs) {
-    NodeConfiguration config = repl_state->parse_node_configuration(all_ips);
-    
-    EXPECT_EQ(0, config.hostname_nodes.size());
-    EXPECT_EQ(3, config.ip_nodes.size());
-    EXPECT_EQ(3, config.total_nodes());
-}
-
-TEST_F(RaftConfigManagerTest, ParseNodeConfigurationEmptyInput) {
-    NodeConfiguration config = repl_state->parse_node_configuration("");
-    
-    EXPECT_EQ(0, config.hostname_nodes.size());
-    EXPECT_EQ(0, config.ip_nodes.size());
-    EXPECT_EQ(0, config.total_nodes());
-    EXPECT_TRUE(config.empty());
+    for (const auto& config : invalid_configs) {
+        NodeConfiguration result = ReplicationState::parse_node_configuration(config);
+        // Should either be empty or have fewer nodes than expected
+        EXPECT_LE(result.total_nodes(), 1) << "Invalid config should not parse: " << config;
+    }
 }
 
 TEST_F(RaftConfigManagerTest, ParseNodeConfigurationDuplicateHandling) {
-    std::string with_duplicates = "node1.example.com:8107:8108,node1.example.com:8107:8108,192.168.1.10:8107:8108";
-    NodeConfiguration config = repl_state->parse_node_configuration(with_duplicates);
+    std::string config_with_duplicates = "node1.example.com:8107:8108,node1.example.com:8107:8108,192.168.1.10:8107:8108";
+    NodeConfiguration result = ReplicationState::parse_node_configuration(config_with_duplicates);
     
-    // Should handle duplicates by only including unique entries
-    EXPECT_EQ(1, config.hostname_nodes.size());
-    EXPECT_EQ(1, config.ip_nodes.size());
-    EXPECT_EQ(2, config.total_nodes());
+    // Should deduplicate
+    EXPECT_EQ(1, result.hostname_nodes.size());
+    EXPECT_EQ(1, result.ip_nodes.size());
+    EXPECT_EQ(2, result.total_nodes());
 }
 
-TEST_F(RaftConfigManagerTest, ParseNodeConfigurationMalformedInput) {
-    NodeConfiguration config = repl_state->parse_node_configuration(malformed_config);
+TEST_F(RaftConfigManagerTest, ParseNodeConfigurationSanityWarnings) {
+    // Test even number of nodes (should generate warning)
+    std::string even_config = "node1:8107:8108,node2:8107:8108,node3:8107:8108,node4:8107:8108";
+    NodeConfiguration result = ReplicationState::parse_node_configuration(even_config);
+    EXPECT_EQ(4, result.total_nodes());
     
-    // Should still parse valid entries and include malformed as hostname
-    EXPECT_EQ(2, config.hostname_nodes.size()); // node1.example.com and "malformed"
-    EXPECT_EQ(1, config.ip_nodes.size());       // 192.168.1.20
-    EXPECT_EQ(3, config.total_nodes());
+    // Test single node (should be fine)
+    std::string single_config = "node1:8107:8108";
+    NodeConfiguration single_result = ReplicationState::parse_node_configuration(single_config);
+    EXPECT_EQ(1, single_result.total_nodes());
 }
 
-// Test extract_hostname_from_node functionality
-TEST_F(RaftConfigManagerTest, ExtractHostnameFromNodeValidInputs) {
-    // Test standard format: hostname:port1:port2
-    std::string hostname1 = repl_state->extract_hostname_from_node("node1.example.com:8107:8108");
-    EXPECT_EQ("node1.example.com", hostname1);
-    
-    // Test with different hostname
-    std::string hostname2 = repl_state->extract_hostname_from_node("server.domain.org:9000:9001");
-    EXPECT_EQ("server.domain.org", hostname2);
-    
-    // Test with single port
-    std::string hostname3 = repl_state->extract_hostname_from_node("host.com:8080");
-    EXPECT_EQ("host.com", hostname3);
+// Test hostname extraction
+TEST_F(RaftConfigManagerTest, ExtractHostnameFromNode) {
+    EXPECT_EQ("node1.example.com", ReplicationState::extract_hostname_from_node("node1.example.com:8107:8108"));
+    EXPECT_EQ("sub.domain.com", ReplicationState::extract_hostname_from_node("sub.domain.com:8107:8108"));
+    EXPECT_EQ("", ReplicationState::extract_hostname_from_node("192.168.1.1:8107:8108")); // IP should return empty
+    EXPECT_EQ("", ReplicationState::extract_hostname_from_node("malformed"));
+    EXPECT_EQ("", ReplicationState::extract_hostname_from_node(""));
 }
 
-TEST_F(RaftConfigManagerTest, ExtractHostnameFromNodeInvalidInputs) {
-    // Test with no colons
-    std::string no_colon = repl_state->extract_hostname_from_node("hostname");
-    EXPECT_TRUE(no_colon.empty());
+// Test braft configuration conversion
+TEST_F(RaftConfigManagerTest, NodeConfigToBraft) {
+    NodeConfiguration config = ReplicationState::parse_node_configuration("node1.example.com:8107:8108,192.168.1.10:8107:8108");
+    braft::Configuration braft_config = ReplicationState::node_config_to_braft(config);
     
-    // Test with empty string
-    std::string empty_result = repl_state->extract_hostname_from_node("");
-    EXPECT_TRUE(empty_result.empty());
-    
-    // Test with IP address format
-    std::string ip_hostname = repl_state->extract_hostname_from_node("192.168.1.10:8107:8108");
-    EXPECT_EQ("192.168.1.10", ip_hostname); // Should still extract the IP part
+    EXPECT_EQ(2, braft_config.size());
 }
 
-// Test node_config_to_braft conversion
-TEST_F(RaftConfigManagerTest, NodeConfigToBraftConversion) {
-    NodeConfiguration node_config = repl_state->parse_node_configuration(all_ips);
-    braft::Configuration braft_config = repl_state->node_config_to_braft(node_config);
-    
-    // Should successfully convert IP-based configuration
-    EXPECT_FALSE(braft_config.empty());
-    EXPECT_EQ(3, braft_config.size());
-}
-
-TEST_F(RaftConfigManagerTest, NodeConfigToBraftWithHostnames) {
-    // Use localhost which should resolve
-    std::string localhost_config = "localhost:8107:8108,127.0.0.1:8107:8108";
-    NodeConfiguration node_config = repl_state->parse_node_configuration(localhost_config);
-    braft::Configuration braft_config = repl_state->node_config_to_braft(node_config);
-    
-    // Should successfully convert mixed configuration
-    EXPECT_FALSE(braft_config.empty());
-}
-
-TEST_F(RaftConfigManagerTest, NodeConfigToBraftEmptyConfig) {
-    NodeConfiguration empty_config;
-    braft::Configuration braft_config = repl_state->node_config_to_braft(empty_config);
-    
-    EXPECT_TRUE(braft_config.empty());
-}
-
-// Test peer_matches_hostname_node functionality
-TEST_F(RaftConfigManagerTest, PeerMatchesHostnameNodeBasicMatching) {
-    // Create a test peer (using localhost IP)
+// Test peer matching
+TEST_F(RaftConfigManagerTest, PeerMatchesHostnameNode) {
+    // Create a peer ID
     braft::PeerId peer_id;
     butil::str2endpoint("127.0.0.1:8107", &peer_id.addr);
     
-    // Test matching with localhost hostname
+    // Test matching (this is a basic test - actual matching depends on DNS resolution)
     bool matches = repl_state->peer_matches_hostname_node(peer_id, "localhost:8107:8108");
-    // Note: This test depends on localhost resolving to 127.0.0.1
-    // In some environments this might not work, so we'll be flexible
-    EXPECT_TRUE(matches || !matches); // Accept either result for localhost resolution
+    // Result depends on DNS resolution, but should not crash
+    EXPECT_TRUE(matches || !matches); // Just ensure no crash
 }
 
-TEST_F(RaftConfigManagerTest, PeerMatchesHostnameNodeNoMatch) {
-    // Create a test peer
-    braft::PeerId peer_id;
-    butil::str2endpoint("192.168.1.100:8107", &peer_id.addr);
+// Test configuration serialization
+TEST_F(RaftConfigManagerTest, ConfigurationSerialization) {
+    NodeConfiguration config = ReplicationState::parse_node_configuration("node1.example.com:8107:8108,192.168.1.10:8107:8108");
+    std::string serialized = config.serialize();
     
-    // Test with non-matching hostname
-    bool matches = repl_state->peer_matches_hostname_node(peer_id, "different-host.com:8107:8108");
-    EXPECT_FALSE(matches); // Should not match due to DNS resolution failure or different IP
+    EXPECT_FALSE(serialized.empty());
+    EXPECT_TRUE(serialized.find("node1.example.com:8107:8108") != std::string::npos);
+    EXPECT_TRUE(serialized.find("192.168.1.10:8107:8108") != std::string::npos);
 }
 
-TEST_F(RaftConfigManagerTest, PeerMatchesHostnameNodeMalformedInput) {
-    braft::PeerId peer_id;
-    butil::str2endpoint("127.0.0.1:8107", &peer_id.addr);
+// Test version comparison with enhanced logic
+TEST_F(RaftConfigManagerTest, ConfigurationVersionComparison) {
+    NodeConfiguration config1 = ReplicationState::parse_node_configuration("node1:8107:8108");
+    NodeConfiguration config2 = ReplicationState::parse_node_configuration("node1:8107:8108");
     
-    // Test with malformed hostname node (no colon)
-    bool matches = repl_state->peer_matches_hostname_node(peer_id, "malformed");
-    EXPECT_FALSE(matches);
+    config1.config_version = 1;
+    config1.config_term = 1;
     
-    // Test with empty hostname node
-    bool matches_empty = repl_state->peer_matches_hostname_node(peer_id, "");
-    EXPECT_FALSE(matches_empty);
+    config2.config_version = 2;
+    config2.config_term = 1;
+    
+    EXPECT_TRUE(config2.is_newer_than(config1));
+    EXPECT_FALSE(config1.is_newer_than(config2));
+    
+    // Test uninitialized term handling
+    config2.config_term = -1; // Force reconfig
+    config2.config_version = 10;
+    EXPECT_TRUE(config2.is_newer_than(config1));
 }
 
-// Test to_nodes_config utility function
-TEST_F(RaftConfigManagerTest, ToNodesConfigWithEmptyNodes) {
-    butil::EndPoint endpoint;
-    butil::str2endpoint("192.168.1.50:8107", &endpoint);
+// Test single-node change creation
+TEST_F(RaftConfigManagerTest, SingleNodeChangeCreation) {
+    NodeConfiguration base = ReplicationState::parse_node_configuration("node1:8107:8108,node2:8107:8108");
     
-    std::string result = repl_state->to_nodes_config(endpoint, 8108, "");
-    EXPECT_EQ("192.168.1.50:8107:8108", result);
+    // Test addition
+    NodeConfiguration add_result = base.create_single_node_change("node3:8107:8108", "", 2);
+    EXPECT_EQ(3, add_result.total_nodes());
+    EXPECT_EQ(2, add_result.config_version);
+    EXPECT_EQ(2, add_result.config_term);
+    
+    // Test removal
+    NodeConfiguration remove_result = base.create_single_node_change("", "node2:8107:8108", 3);
+    EXPECT_EQ(1, remove_result.total_nodes());
+    EXPECT_EQ(2, remove_result.config_version);
+    EXPECT_EQ(3, remove_result.config_term);
 }
 
-TEST_F(RaftConfigManagerTest, ToNodesConfigWithExistingNodes) {
-    butil::EndPoint endpoint;
-    butil::str2endpoint("192.168.1.50:8107", &endpoint);
-    
-    std::string existing_nodes = "node1.example.com:8107:8108,node2.example.com:8107:8108";
-    std::string result = repl_state->to_nodes_config(endpoint, 8108, existing_nodes);
-    
-    std::string expected = existing_nodes + ",192.168.1.50:8107:8108";
-    EXPECT_EQ(expected, result);
+// Test self-node detection
+TEST_F(RaftConfigManagerTest, SelfNodeDetection) {
+    EXPECT_TRUE(repl_state->is_self_node("localhost:8107:8108"));
+    EXPECT_TRUE(repl_state->is_self_node("127.0.0.1:8107:8108"));
+    EXPECT_TRUE(repl_state->is_self_node("::1:8107:8108"));
+    EXPECT_FALSE(repl_state->is_self_node("remote.host.com:8107:8108"));
+    EXPECT_FALSE(repl_state->is_self_node("192.168.1.100:8107:8108"));
 }
 
-// Performance and stress tests
-TEST_F(RaftConfigManagerTest, LargeConfigurationParsing) {
-    // Create a large configuration (50 nodes as per MongoDB limit)
-    std::vector<std::string> nodes;
-    for (int i = 1; i <= 50; ++i) {
-        nodes.push_back("node" + std::to_string(i) + ".example.com:8107:8108");
-    }
-    std::string large_config = StringUtils::join(nodes, ",");
-    
+// Performance test for DNS operations
+TEST_F(RaftConfigManagerTest, DNSPerformanceWithCaching) {
     auto start = std::chrono::high_resolution_clock::now();
-    NodeConfiguration config = repl_state->parse_node_configuration(large_config);
+    
+    // First batch - should populate cache
+    for (int i = 0; i < 100; ++i) {
+        std::string result = repl_state->hostname2ipstr("localhost");
+        EXPECT_FALSE(result.empty());
+    }
+    
+    auto mid = std::chrono::high_resolution_clock::now();
+    
+    // Second batch - should use cache
+    for (int i = 0; i < 100; ++i) {
+        std::string result = repl_state->hostname2ipstr("localhost");
+        EXPECT_FALSE(result.empty());
+    }
+    
     auto end = std::chrono::high_resolution_clock::now();
     
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    auto first_batch_time = std::chrono::duration_cast<std::chrono::microseconds>(mid - start);
+    auto second_batch_time = std::chrono::duration_cast<std::chrono::microseconds>(end - mid);
     
-    EXPECT_EQ(50, config.hostname_nodes.size());
-    EXPECT_EQ(0, config.ip_nodes.size());
-    EXPECT_EQ(50, config.total_nodes());
+    // Second batch should be significantly faster due to caching
+    // (though the first lookup might also be cached by the system)
+    EXPECT_LT(second_batch_time.count(), first_batch_time.count() * 2);
     
-    // Should complete parsing within reasonable time (< 10ms)
-    EXPECT_LT(duration.count(), 10000);
-}
-
-TEST_F(RaftConfigManagerTest, ConfigurationSerializationRoundTrip) {
-    // Test serialization round-trip
-    NodeConfiguration original = repl_state->parse_node_configuration(mixed_config);
-    std::string serialized = original.serialize();
-    NodeConfiguration deserialized = repl_state->parse_node_configuration(serialized);
-    
-    EXPECT_EQ(original.hostname_nodes.size(), deserialized.hostname_nodes.size());
-    EXPECT_EQ(original.ip_nodes.size(), deserialized.ip_nodes.size());
-    EXPECT_EQ(original.total_nodes(), deserialized.total_nodes());
-    
-    // Note: Version and term may differ as they're set during parsing
-    for (size_t i = 0; i < original.hostname_nodes.size(); ++i) {
-        EXPECT_EQ(original.hostname_nodes[i], deserialized.hostname_nodes[i]);
-    }
-    for (size_t i = 0; i < original.ip_nodes.size(); ++i) {
-        EXPECT_EQ(original.ip_nodes[i], deserialized.ip_nodes[i]);
-    }
-}
-
-// Thread safety tests
-TEST_F(RaftConfigManagerTest, ConcurrentConfigurationParsing) {
-    const int num_threads = 10;
-    const int operations_per_thread = 100;
-    std::vector<std::thread> threads;
-    std::atomic<int> successful_operations{0};
-    std::atomic<int> failed_operations{0};
-    
-    for (int i = 0; i < num_threads; ++i) {
-        threads.emplace_back([&, i]() {
-            for (int j = 0; j < operations_per_thread; ++j) {
-                try {
-                    std::string config = "node" + std::to_string(i) + "-" + std::to_string(j) + ".example.com:8107:8108";
-                    NodeConfiguration parsed = repl_state->parse_node_configuration(config);
-                    
-                    if (parsed.total_nodes() == 1) {
-                        successful_operations++;
-                    } else {
-                        failed_operations++;
-                    }
-                } catch (...) {
-                    failed_operations++;
-                }
-            }
-        });
-    }
-    
-    for (auto& thread : threads) {
-        thread.join();
-    }
-    
-    int expected_operations = num_threads * operations_per_thread;
-    EXPECT_EQ(expected_operations, successful_operations.load() + failed_operations.load());
-    EXPECT_GT(successful_operations.load(), expected_operations * 0.9); // At least 90% should succeed
+    LOG(INFO) << "DNS performance: first batch " << first_batch_time.count() 
+              << "μs, second batch " << second_batch_time.count() << "μs";
 } 

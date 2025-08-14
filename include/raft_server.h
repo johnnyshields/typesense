@@ -595,4 +595,32 @@ private:
 
     std::string get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
                                   const std::string& protocol) const;
+
+    // Safety Validator Methods (MongoDB TLA+ patterns)
+    void handle_peer_failure(const braft::PeerId& failed_peer_id);
+    void trigger_immediate_config_refresh();
+    bool add_node_safe(const std::string& node_to_add);
+    bool remove_node_safe(const std::string& node_to_remove);
+    bool is_config_safe_for_reconfig() const;
+    bool config_is_safe() const;
+    bool has_term_quorum_check() const;
+    bool has_config_quorum_check() const;
+    bool are_previous_ops_committed_in_current_config() const;
+    bool validate_new_config_quorum(const NodeConfiguration& new_config) const;
+    
+    // Helper methods
+    bool is_self_node(const std::string& node_spec) const;
+
+    // Config Manager Methods (DNS resolution and node parsing)
+    static NodeConfiguration parse_node_configuration(const std::string& nodes_config);
+    std::string hostname2ipstr(const std::string& hostname);
+    static braft::Configuration node_config_to_braft(const NodeConfiguration& config);
+    static std::string extract_hostname_from_node(const std::string& node_spec);
+    bool peer_matches_hostname_node(const braft::PeerId& peer_id, const std::string& hostname_node);
+    std::string to_nodes_config(const butil::EndPoint& peering_endpoint, const int api_port, const std::string& nodes);
+    
+    // DNS cache management for production use
+    void clear_dns_cache();
+    void clear_dns_cache_for_hostname(const std::string& hostname);
+    size_t get_dns_cache_size() const;
 };

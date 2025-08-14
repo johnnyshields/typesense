@@ -36,98 +36,86 @@ void ReplicationState::trigger_immediate_config_refresh() {
 bool ReplicationState::add_node_safe(const std::string& node_to_add) {
     LOG(INFO) << "Attempting to safely add node: " << node_to_add;
     
-    // Step 1: Basic safety checks
-    if (!is_config_safe_for_reconfig()) {
-        LOG(WARNING) << "Cluster not in safe state for reconfiguration";
+    // Note: In Typesense's file-based model, this is primarily for validation
+    // Actual node addition happens via file updates and periodic refresh
+    
+    // Step 1: Basic validation
+    if (node_to_add.empty()) {
+        LOG(WARNING) << "Cannot add empty node";
         return false;
     }
     
-    // Step 2: MongoDB TLA+ ConfigIsSafe validation
-    if (!config_is_safe()) {
-        LOG(WARNING) << "MongoDB TLA+ ConfigIsSafe validation failed";
+    // Step 2: Check if we're in a reasonable state for changes
+    if (!is_leader()) {
+        LOG(DEBUG) << "Not leader - node addition should be done via file update";
         return false;
     }
     
-    // Step 3: Create the new configuration
+    // Step 3: Create the new configuration for validation
     std::shared_lock<std::shared_mutex> lock(current_config_mutex);
     NodeConfiguration new_config = current_node_config.create_single_node_change(node_to_add, "", get_current_term());
-    lock.unlock();
     
-    // Step 4: Validate single-node change safety
-    std::shared_lock<std::shared_mutex> lock2(current_config_mutex);
+    // Step 4: Basic safety validation (prevent obvious errors)
     if (!current_node_config.is_safe_single_node_change(new_config)) {
         LOG(WARNING) << "Single-node change validation failed for adding: " << node_to_add;
         return false;
     }
-    lock2.unlock();
     
-    // Step 5: Validate new configuration can achieve quorum
+    // Step 5: Basic quorum validation
     if (!validate_new_config_quorum(new_config)) {
-        LOG(WARNING) << "New configuration quorum validation failed";
+        LOG(WARNING) << "New configuration would not have valid quorum";
         return false;
     }
+    lock.unlock();
     
-    // Step 6: Apply the configuration change
-    std::string new_nodes_str = new_config.serialize();
-    LOG(INFO) << "Applying safe node addition: " << new_nodes_str;
-    
-    // Update current configuration
-    std::unique_lock<std::shared_mutex> write_lock(current_config_mutex);
-    current_node_config = new_config;
-    current_nodes_config_str = new_nodes_str;
-    write_lock.unlock();
-    
-    // TODO: Actually apply to braft (would need raft node reference)
-    LOG(INFO) << "Successfully planned safe addition of node: " << node_to_add;
+    LOG(INFO) << "Node addition validation passed for: " << node_to_add 
+              << " (actual addition should be done via file update)";
     return true;
 }
 
 bool ReplicationState::remove_node_safe(const std::string& node_to_remove) {
     LOG(INFO) << "Attempting to safely remove node: " << node_to_remove;
     
-    // Step 1: Basic safety checks
-    if (!is_config_safe_for_reconfig()) {
-        LOG(WARNING) << "Cluster not in safe state for reconfiguration";
+    // Note: In Typesense's file-based model, this is primarily for validation
+    // Actual node removal happens via file updates and periodic refresh
+    
+    // Step 1: Basic validation
+    if (node_to_remove.empty()) {
+        LOG(WARNING) << "Cannot remove empty node";
         return false;
     }
     
-    // Step 2: MongoDB TLA+ ConfigIsSafe validation
-    if (!config_is_safe()) {
-        LOG(WARNING) << "MongoDB TLA+ ConfigIsSafe validation failed";
+    // Step 2: Check if we're in a reasonable state for changes
+    if (!is_leader()) {
+        LOG(DEBUG) << "Not leader - node removal should be done via file update";
         return false;
     }
     
-    // Step 3: Create the new configuration
+    // Step 3: Create the new configuration for validation
     std::shared_lock<std::shared_mutex> lock(current_config_mutex);
     NodeConfiguration new_config = current_node_config.create_single_node_change("", node_to_remove, get_current_term());
-    lock.unlock();
     
-    // Step 4: Validate single-node change safety
-    std::shared_lock<std::shared_mutex> lock2(current_config_mutex);
+    // Step 4: Basic safety validation (prevent obvious errors)
     if (!current_node_config.is_safe_single_node_change(new_config)) {
         LOG(WARNING) << "Single-node change validation failed for removing: " << node_to_remove;
         return false;
     }
-    lock2.unlock();
     
-    // Step 5: Validate new configuration can achieve quorum
+    // Step 5: Basic quorum validation
     if (!validate_new_config_quorum(new_config)) {
-        LOG(WARNING) << "New configuration quorum validation failed";
+        LOG(WARNING) << "New configuration would not have valid quorum";
         return false;
     }
     
-    // Step 6: Apply the configuration change
-    std::string new_nodes_str = new_config.serialize();
-    LOG(INFO) << "Applying safe node removal: " << new_nodes_str;
+    // Step 6: Ensure we're not removing ourselves
+    if (is_self_node(node_to_remove)) {
+        LOG(WARNING) << "Cannot remove self from configuration";
+        return false;
+    }
+    lock.unlock();
     
-    // Update current configuration
-    std::unique_lock<std::shared_mutex> write_lock(current_config_mutex);
-    current_node_config = new_config;
-    current_nodes_config_str = new_nodes_str;
-    write_lock.unlock();
-    
-    // TODO: Actually apply to braft (would need raft node reference)
-    LOG(INFO) << "Successfully planned safe removal of node: " << node_to_remove;
+    LOG(INFO) << "Node removal validation passed for: " << node_to_remove 
+              << " (actual removal should be done via file update)";
     return true;
 }
 
@@ -381,4 +369,20 @@ bool ReplicationState::validate_new_config_quorum(const NodeConfiguration& new_c
     LOG(DEBUG) << "New configuration quorum validation passed: " 
                << new_quorum_size << "/" << new_total_nodes;
     return true;
+} 
+
+bool ReplicationState::is_self_node(const std::string& node_spec) const {
+    // Simple heuristic to check if a node specification refers to this node
+    // In a production system, this would need more sophisticated matching
+    // against the actual peering endpoint and hostname resolution
+    
+    if (node_spec.find("localhost") != std::string::npos ||
+        node_spec.find("127.0.0.1") != std::string::npos ||
+        node_spec.find("::1") != std::string::npos) {
+        return true;
+    }
+    
+    // TODO: More sophisticated self-detection based on actual peering_endpoint
+    // For now, this prevents obvious self-removal attempts
+    return false;
 } 
