@@ -47,12 +47,49 @@ TEST_F(RaftConfigManagerTest, DNSCacheManagement) {
     repl_state->hostname2ipstr("localhost");
     EXPECT_GT(repl_state->get_dns_cache_size(), 0);
     
+    // Test cache stats functionality
+    auto& cache = repl_state->get_dns_cache();
+    auto stats_before = cache.get_stats();
+    
+    // Another resolution should be a cache hit
+    repl_state->hostname2ipstr("localhost");
+    auto stats_after = cache.get_stats();
+    EXPECT_GT(stats_after.hits, stats_before.hits);
+    
     // Clear specific hostname
     repl_state->clear_dns_cache_for_hostname("localhost");
     
     // Clear entire cache
     repl_state->clear_dns_cache();
     EXPECT_EQ(repl_state->get_dns_cache_size(), 0);
+}
+
+TEST_F(RaftConfigManagerTest, DNSCacheAdvancedFeatures) {
+    auto& cache = repl_state->get_dns_cache();
+    
+    // Test configuration
+    EXPECT_EQ(cache.get_ttl(), std::chrono::minutes(5)); // Default TTL
+    EXPECT_EQ(cache.get_max_size(), 1000); // Default max size
+    
+    // Add multiple entries
+    repl_state->hostname2ipstr("host1.example.com");
+    repl_state->hostname2ipstr("host2.example.com");
+    repl_state->hostname2ipstr("host3.example.com");
+    
+    // Check cached hostnames
+    auto hostnames = cache.get_cached_hostnames();
+    EXPECT_GE(hostnames.size(), 3);
+    
+    // Test stats
+    auto stats = cache.get_stats();
+    EXPECT_GE(stats.hits + stats.misses, 3);
+    
+    // Test cache configuration changes
+    cache.set_ttl(std::chrono::minutes(10));
+    EXPECT_EQ(cache.get_ttl(), std::chrono::minutes(10));
+    
+    cache.set_max_size(5);
+    EXPECT_EQ(cache.get_max_size(), 5);
 }
 
 // Test enhanced configuration parsing with validation

@@ -11,31 +11,16 @@
 // Extracted from raft_server.cpp for better organization
 
 std::string ReplicationState::hostname2ipstr(const std::string& hostname) {
-    // Enhanced DNS resolution with better error handling and basic caching
+    // Enhanced DNS resolution with proper cache management
     
     if (hostname.empty()) {
         LOG(WARNING) << "Empty hostname provided for resolution";
         return "";
     }
     
-    // Simple cache check (basic optimization for repeated lookups)
-    static std::unordered_map<std::string, std::pair<std::string, std::chrono::steady_clock::time_point>> dns_cache;
-    static std::mutex dns_cache_mutex;
-    static const auto CACHE_TTL = std::chrono::minutes(5); // 5-minute TTL
-    
-    {
-        std::lock_guard<std::mutex> lock(dns_cache_mutex);
-        auto it = dns_cache.find(hostname);
-        if (it != dns_cache.end()) {
-            auto age = std::chrono::steady_clock::now() - it->second.second;
-            if (age < CACHE_TTL) {
-                LOG(DEBUG) << "Using cached DNS resolution: " << hostname << " -> " << it->second.first;
-                return it->second.first;
-            } else {
-                // Cache expired, remove entry
-                dns_cache.erase(it);
-            }
-        }
+    // Check cache first
+    if (auto cached_ip = dns_cache_->get(hostname)) {
+        return *cached_ip;
     }
     
     LOG(DEBUG) << "Resolving hostname: " << hostname;
@@ -89,10 +74,7 @@ std::string ReplicationState::hostname2ipstr(const std::string& hostname) {
     }
     
     // Cache the successful resolution
-    {
-        std::lock_guard<std::mutex> lock(dns_cache_mutex);
-        dns_cache[hostname] = {ip_str, std::chrono::steady_clock::now()};
-    }
+    dns_cache_->put(hostname, ip_str);
     
     LOG(INFO) << "Successfully resolved " << hostname << " -> " << ip_str;
     return ip_str;
@@ -278,31 +260,13 @@ std::string ReplicationState::to_nodes_config(const butil::EndPoint& peering_end
 
 // DNS cache management methods
 void ReplicationState::clear_dns_cache() {
-    static std::mutex dns_cache_mutex;
-    static std::unordered_map<std::string, std::pair<std::string, std::chrono::steady_clock::time_point>> dns_cache;
-    
-    std::lock_guard<std::mutex> lock(dns_cache_mutex);
-    size_t cleared = dns_cache.size();
-    dns_cache.clear();
-    LOG(INFO) << "Cleared DNS cache (" << cleared << " entries)";
+    dns_cache_->clear();
 }
 
 void ReplicationState::clear_dns_cache_for_hostname(const std::string& hostname) {
-    static std::mutex dns_cache_mutex;
-    static std::unordered_map<std::string, std::pair<std::string, std::chrono::steady_clock::time_point>> dns_cache;
-    
-    std::lock_guard<std::mutex> lock(dns_cache_mutex);
-    auto it = dns_cache.find(hostname);
-    if (it != dns_cache.end()) {
-        dns_cache.erase(it);
-        LOG(INFO) << "Cleared DNS cache entry for: " << hostname;
-    }
+    dns_cache_->clear_hostname(hostname);
 }
 
 size_t ReplicationState::get_dns_cache_size() const {
-    static std::mutex dns_cache_mutex;
-    static std::unordered_map<std::string, std::pair<std::string, std::chrono::steady_clock::time_point>> dns_cache;
-    
-    std::lock_guard<std::mutex> lock(dns_cache_mutex);
-    return dns_cache.size();
+    return dns_cache_->size();
 } 

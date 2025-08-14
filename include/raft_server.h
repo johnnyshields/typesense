@@ -18,6 +18,7 @@
 #include "threadpool.h"
 #include "http_server.h"
 #include "batched_indexer.h"
+#include "raft_dns_cache.h"
 #include "cached_resource_stat.h"
 #include "string_utils.h"
 
@@ -325,6 +326,9 @@ private:
     std::string current_nodes_config_str;
     std::atomic<bool> immediate_refresh_requested;
     
+    // DNS cache for hostname resolution
+    std::unique_ptr<RaftDNSCache> dns_cache_;
+    
     // MongoDB TLA+ ConfigIsSafe state tracking
     mutable std::shared_mutex safety_state_mutex;
     std::atomic<uint64_t> last_term_quorum_check;
@@ -623,4 +627,8 @@ private:
     void clear_dns_cache();
     void clear_dns_cache_for_hostname(const std::string& hostname);
     size_t get_dns_cache_size() const;
+    
+    // Access to DNS cache for advanced operations
+    RaftDNSCache& get_dns_cache() { return *dns_cache_; }
+    const RaftDNSCache& get_dns_cache() const { return *dns_cache_; }
 };

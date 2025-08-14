@@ -69,7 +69,8 @@ ReplicationState::ReplicationState(HttpServer* server, BatchedIndexer* batched_i
     immediate_refresh_requested(false),
     last_term_quorum_check(0),
     last_config_quorum_check(0),
-    last_safety_validation(std::chrono::steady_clock::now()) {
+    last_safety_validation(std::chrono::steady_clock::now()),
+    dns_cache_(std::make_unique<RaftDNSCache>()) {
     
     LOG(INFO) << "ReplicationState coordinator initialized";
 }
