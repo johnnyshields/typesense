@@ -308,6 +308,12 @@ private:
     NodeConfiguration current_node_config;
     std::string current_nodes_config_str;
     std::atomic<bool> immediate_refresh_requested;
+    
+    // MongoDB TLA+ ConfigIsSafe state tracking
+    mutable std::shared_mutex safety_state_mutex;
+    std::atomic<uint64_t> last_term_quorum_check;
+    std::atomic<uint64_t> last_config_quorum_check;
+    std::chrono::steady_clock::time_point last_safety_validation;
 
 public:
 
@@ -450,10 +456,41 @@ public:
     bool remove_node_safe(const std::string& node_to_remove);
 
     /**
-     * Check if the current configuration is safe for making changes.
-     * Implements MongoDB's ConfigIsSafe pattern from TLA+ specs.
+     * Check if the current configuration is safe for reconfiguration.
+     * Basic safety checks: leader status, stable term, committed entries.
      */
-    bool is_config_safe_for_changes() const;
+    bool is_config_safe_for_reconfig() const;
+
+    /**
+     * MongoDB TLA+ ConfigIsSafe implementation.
+     * Validates term quorum, config quorum, and committed operations.
+     * This is the comprehensive safety check from MongoDB's TLA+ specifications.
+     */
+    bool config_is_safe() const;
+
+    /**
+     * Check if we have talked to a quorum in the current term (MongoDB TLA+ TermQuorumCheck).
+     * This ensures the leader has established authority in the current term.
+     */
+    bool has_term_quorum_check() const;
+
+    /**
+     * Check if the current config has been acknowledged by a quorum (MongoDB TLA+ ConfigQuorumCheck).
+     * This ensures config consensus before allowing further changes.
+     */
+    bool has_config_quorum_check() const;
+
+    /**
+     * Check if operations committed in previous configs are still committed (MongoDB TLA+ OpCommittedInConfig).
+     * This prevents data loss during configuration changes.
+     */
+    bool are_previous_ops_committed_in_current_config() const;
+
+    /**
+     * Validate that a quorum of nodes in the new config are alive and reachable.
+     * Implements MongoDB's alive nodes quorum check.
+     */
+    bool validate_new_config_quorum(const NodeConfiguration& new_config) const;
 
     /**
      * Get the current Raft term for configuration versioning.

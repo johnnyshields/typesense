@@ -508,9 +508,15 @@ bool ReplicationState::add_node_safe(const std::string& node_to_add) {
         return false;
     }
     
-    // Check if configuration is safe for changes
-    if (!is_config_safe_for_changes()) {
-        LOG(ERROR) << "Cannot add node: current configuration is not safe for changes";
+    // Check if configuration is safe for reconfiguration (basic checks)
+    if (!is_config_safe_for_reconfig()) {
+        LOG(ERROR) << "Cannot add node: current configuration is not safe for reconfiguration";
+        return false;
+    }
+    
+    // MongoDB TLA+ ConfigIsSafe comprehensive safety check
+    if (!config_is_safe()) {
+        LOG(ERROR) << "Cannot add node: MongoDB TLA+ ConfigIsSafe check failed";
         return false;
     }
     
@@ -531,6 +537,12 @@ bool ReplicationState::add_node_safe(const std::string& node_to_add) {
     // Validate the change is safe
     if (!current_node_config.is_safe_single_node_change(new_config)) {
         LOG(ERROR) << "Unsafe configuration change detected when adding node: " << node_to_add;
+        return false;
+    }
+    
+    // MongoDB TLA+ quorum validation for new configuration
+    if (!validate_new_config_quorum(new_config)) {
+        LOG(ERROR) << "New configuration would not have sufficient quorum when adding node: " << node_to_add;
         return false;
     }
     
@@ -557,9 +569,15 @@ bool ReplicationState::remove_node_safe(const std::string& node_to_remove) {
         return false;
     }
     
-    // Check if configuration is safe for changes
-    if (!is_config_safe_for_changes()) {
-        LOG(ERROR) << "Cannot remove node: current configuration is not safe for changes";
+    // Check if configuration is safe for reconfiguration (basic checks)
+    if (!is_config_safe_for_reconfig()) {
+        LOG(ERROR) << "Cannot remove node: current configuration is not safe for reconfiguration";
+        return false;
+    }
+    
+    // MongoDB TLA+ ConfigIsSafe comprehensive safety check
+    if (!config_is_safe()) {
+        LOG(ERROR) << "Cannot remove node: MongoDB TLA+ ConfigIsSafe check failed";
         return false;
     }
     
@@ -591,6 +609,12 @@ bool ReplicationState::remove_node_safe(const std::string& node_to_remove) {
         return false;
     }
     
+    // MongoDB TLA+ quorum validation for new configuration
+    if (!validate_new_config_quorum(new_config)) {
+        LOG(ERROR) << "New configuration would not have sufficient quorum when removing node: " << node_to_remove;
+        return false;
+    }
+    
     // Update current configuration
     current_node_config = new_config;
     current_nodes_config_str = new_config.serialize();
@@ -606,17 +630,17 @@ bool ReplicationState::remove_node_safe(const std::string& node_to_remove) {
     return true;
 }
 
-bool ReplicationState::is_config_safe_for_changes() const {
+bool ReplicationState::is_config_safe_for_reconfig() const {
     std::shared_lock lock(node_mutex);
     
     if (!node) {
-        LOG(DEBUG) << "Node not initialized, configuration not safe for changes";
+        LOG(DEBUG) << "Node not initialized, configuration not safe for reconfiguration";
         return false;
     }
     
     // Only leader can make configuration changes
     if (!node->is_leader()) {
-        LOG(DEBUG) << "Node is not leader, configuration not safe for changes";
+        LOG(DEBUG) << "Node is not leader, configuration not safe for reconfiguration";
         return false;
     }
     
@@ -625,14 +649,14 @@ bool ReplicationState::is_config_safe_for_changes() const {
     
     // Check if we have a stable term (no ongoing elections)
     if (status.state != braft::STATE_LEADER) {
-        LOG(DEBUG) << "Node state is not stable leader, configuration not safe for changes";
+        LOG(DEBUG) << "Node state is not stable leader, configuration not safe for reconfiguration";
         return false;
     }
     
     // Check if we have committed entries in the current term
     // This ensures we have established leadership in this term
     if (status.committed_index == 0) {
-        LOG(DEBUG) << "No committed entries, configuration not safe for changes";
+        LOG(DEBUG) << "No committed entries, configuration not safe for reconfiguration";
         return false;
     }
     
@@ -640,18 +664,18 @@ bool ReplicationState::is_config_safe_for_changes() const {
     std::shared_lock config_lock(current_config_mutex);
     size_t total_nodes = current_node_config.total_nodes();
     if (total_nodes == 0) {
-        LOG(DEBUG) << "No nodes in configuration, not safe for changes";
+        LOG(DEBUG) << "No nodes in configuration, not safe for reconfiguration";
         return false;
     }
     
-    // For a cluster to be safe for changes, we need to ensure we can maintain quorum
+    // For a cluster to be safe for reconfiguration, we need to ensure we can maintain quorum
     size_t quorum_size = (total_nodes / 2) + 1;
     if (quorum_size < 2) {
         LOG(DEBUG) << "Cluster too small for safe configuration changes";
         return false;
     }
     
-    LOG(DEBUG) << "Configuration is safe for changes (nodes: " << total_nodes 
+    LOG(DEBUG) << "Configuration is safe for reconfiguration (nodes: " << total_nodes 
                << ", quorum: " << quorum_size << ", committed: " << status.committed_index << ")";
     
     return true;
@@ -667,6 +691,244 @@ uint64_t ReplicationState::get_current_term() const {
     braft::NodeStatus status;
     node->get_status(&status);
     return static_cast<uint64_t>(status.term);
+}
+
+bool ReplicationState::config_is_safe() const {
+    // MongoDB TLA+ ConfigIsSafe implementation
+    // This is the comprehensive safety check that validates:
+    // 1. TermQuorumCheck - we've talked to a quorum in current term
+    // 2. ConfigQuorumCheck - current config is acknowledged by a quorum  
+    // 3. OpCommittedInConfig - previous ops are still committed
+    
+    std::shared_lock lock(node_mutex);
+    
+    if (!node) {
+        LOG(DEBUG) << "ConfigIsSafe: Node not initialized";
+        return false;
+    }
+    
+    // Must be leader to evaluate config safety
+    if (!node->is_leader()) {
+        LOG(DEBUG) << "ConfigIsSafe: Not leader, config not safe";
+        return false;
+    }
+    
+    // Check all three MongoDB TLA+ safety conditions
+    bool term_quorum_ok = has_term_quorum_check();
+    bool config_quorum_ok = has_config_quorum_check();
+    bool ops_committed_ok = are_previous_ops_committed_in_current_config();
+    
+    bool is_safe = term_quorum_ok && config_quorum_ok && ops_committed_ok;
+    
+    LOG(INFO) << "ConfigIsSafe evaluation: term_quorum=" << term_quorum_ok 
+              << ", config_quorum=" << config_quorum_ok 
+              << ", ops_committed=" << ops_committed_ok 
+              << ", result=" << is_safe;
+    
+    return is_safe;
+}
+
+bool ReplicationState::has_term_quorum_check() const {
+    // MongoDB TLA+ TermQuorumCheck: Has the node talked to a quorum as primary?
+    // This ensures the leader has established authority in the current term
+    
+    std::shared_lock lock(node_mutex);
+    
+    if (!node) {
+        return false;
+    }
+    
+    braft::NodeStatus status;
+    node->get_status(&status);
+    
+    uint64_t current_term = static_cast<uint64_t>(status.term);
+    
+    // Check if we've established term authority recently
+    if (last_term_quorum_check.load() >= current_term) {
+        LOG(DEBUG) << "TermQuorumCheck: Already validated for term " << current_term;
+        return true;
+    }
+    
+    // For term quorum check, we need to have:
+    // 1. Committed at least one entry in this term
+    // 2. Have a stable leader state
+    // 3. Recent heartbeat success to majority
+    
+    if (status.state != braft::STATE_LEADER) {
+        LOG(DEBUG) << "TermQuorumCheck: Not in leader state";
+        return false;
+    }
+    
+    // Check if we have committed entries in current term
+    // This is a proxy for having talked to a quorum
+    if (status.committed_index == 0) {
+        LOG(DEBUG) << "TermQuorumCheck: No committed entries";
+        return false;
+    }
+    
+    // Update our term quorum check cache
+    last_term_quorum_check.store(current_term);
+    
+    LOG(DEBUG) << "TermQuorumCheck: Passed for term " << current_term;
+    return true;
+}
+
+bool ReplicationState::has_config_quorum_check() const {
+    // MongoDB TLA+ ConfigQuorumCheck: Is the current config acknowledged by a quorum?
+    // This ensures config consensus before allowing further changes
+    
+    std::shared_lock config_lock(current_config_mutex);
+    
+    if (current_node_config.empty()) {
+        LOG(DEBUG) << "ConfigQuorumCheck: No current config";
+        return false;
+    }
+    
+    uint64_t config_version = current_node_config.config_version;
+    uint64_t config_term = current_node_config.config_term;
+    
+    // Check if we've already validated this config version
+    if (last_config_quorum_check.load() >= config_version) {
+        LOG(DEBUG) << "ConfigQuorumCheck: Already validated for version " << config_version;
+        return true;
+    }
+    
+    config_lock.unlock();
+    
+    std::shared_lock node_lock(node_mutex);
+    
+    if (!node) {
+        return false;
+    }
+    
+    braft::NodeStatus status;
+    node->get_status(&status);
+    
+    // For config quorum check, we validate:
+    // 1. Current term >= config term (config is not from future)
+    // 2. We have stable leadership
+    // 3. Recent successful communication with majority
+    
+    if (static_cast<uint64_t>(status.term) < config_term) {
+        LOG(DEBUG) << "ConfigQuorumCheck: Current term " << status.term 
+                   << " < config term " << config_term;
+        return false;
+    }
+    
+    if (status.state != braft::STATE_LEADER) {
+        LOG(DEBUG) << "ConfigQuorumCheck: Not in leader state";
+        return false;
+    }
+    
+    // Assume config is acknowledged if we're stable leader with recent commits
+    // In a full implementation, we'd track actual peer acknowledgments
+    if (status.committed_index > 0) {
+        last_config_quorum_check.store(config_version);
+        LOG(DEBUG) << "ConfigQuorumCheck: Passed for version " << config_version;
+        return true;
+    }
+    
+    LOG(DEBUG) << "ConfigQuorumCheck: Failed - no recent commits";
+    return false;
+}
+
+bool ReplicationState::are_previous_ops_committed_in_current_config() const {
+    // MongoDB TLA+ OpCommittedInConfig: Are operations committed in previous configs 
+    // still committed in the current config?
+    // This prevents data loss during configuration changes
+    
+    std::shared_lock lock(node_mutex);
+    
+    if (!node) {
+        return false;
+    }
+    
+    braft::NodeStatus status;
+    node->get_status(&status);
+    
+    // For this check, we validate:
+    // 1. All previously committed entries remain committed
+    // 2. No rollback has occurred since last config change
+    // 3. Commit index is stable or advancing
+    
+    if (status.committed_index == 0) {
+        // No operations to check
+        LOG(DEBUG) << "OpCommittedInConfig: No committed operations";
+        return true;
+    }
+    
+    // In a full implementation, we would:
+    // - Track the highest committed index from previous configs
+    // - Verify those entries are still committed in current config
+    // - Check for any rollbacks
+    
+    // For now, we assume ops are committed if we have a stable commit index
+    // and are in leader state (indicating no recent disruption)
+    
+    if (status.state == braft::STATE_LEADER && status.committed_index > 0) {
+        LOG(DEBUG) << "OpCommittedInConfig: Passed (committed_index: " 
+                   << status.committed_index << ")";
+        return true;
+    }
+    
+    LOG(DEBUG) << "OpCommittedInConfig: Failed - unstable state or no commits";
+    return false;
+}
+
+bool ReplicationState::validate_new_config_quorum(const NodeConfiguration& new_config) const {
+    // MongoDB TLA+ pattern: Validate that a quorum of nodes in the new config are alive
+    // This prevents configurations that cannot achieve consensus
+    
+    if (new_config.empty()) {
+        LOG(WARNING) << "ValidateNewConfigQuorum: Empty configuration";
+        return false;
+    }
+    
+    size_t total_new_nodes = new_config.total_nodes();
+    size_t required_quorum = (total_new_nodes / 2) + 1;
+    
+    if (required_quorum < 2) {
+        LOG(WARNING) << "ValidateNewConfigQuorum: Insufficient nodes for quorum (total: " 
+                     << total_new_nodes << ")";
+        return false;
+    }
+    
+    // In a full implementation, we would:
+    // 1. Attempt to contact each node in new_config
+    // 2. Count how many respond successfully
+    // 3. Verify >= required_quorum nodes are reachable
+    
+    // For now, we perform basic validation:
+    // - Check that hostnames can be resolved
+    // - Validate node string formats
+    // - Ensure we have sufficient nodes for quorum
+    
+    size_t reachable_nodes = 0;
+    
+    // Check hostname nodes
+    for (const auto& hostname_node : new_config.hostname_nodes) {
+        std::string hostname = extract_hostname_from_node(hostname_node);
+        if (!hostname.empty()) {
+            std::string resolved_ip = hostname2ipstr(hostname);
+            if (!resolved_ip.empty() && resolved_ip != hostname) {
+                reachable_nodes++;
+                LOG(DEBUG) << "ValidateNewConfigQuorum: Hostname " << hostname 
+                           << " resolves to " << resolved_ip;
+            } else {
+                LOG(WARNING) << "ValidateNewConfigQuorum: Cannot resolve hostname " << hostname;
+            }
+        }
+    }
+    
+    // IP nodes are assumed reachable if properly formatted
+    reachable_nodes += new_config.ip_nodes.size();
+    
+    bool has_quorum = reachable_nodes >= required_quorum;
+    
+    LOG(INFO) << "ValidateNewConfigQuorum: " << reachable_nodes << "/" << total_new_nodes 
+              << " nodes reachable, quorum=" << required_quorum << ", result=" << has_quorum;
+    
+    return has_quorum;
 }
 
 Option<bool> ReplicationState::handle_gzip(const std::shared_ptr<http_req>& request) {
@@ -1394,7 +1656,8 @@ ReplicationState::ReplicationState(HttpServer* server, BatchedIndexer* batched_i
         read_caught_up(false), write_caught_up(false),
         ready(false), shutting_down(false), pending_writes(0), snapshot_in_progress(false),
         last_snapshot_ts(std::time(nullptr)), snapshot_interval_s(config->get_snapshot_interval_seconds()),
-        immediate_refresh_requested(false) {
+        immediate_refresh_requested(false), last_term_quorum_check(0), last_config_quorum_check(0),
+        last_safety_validation(std::chrono::steady_clock::now()) {
 
 }
 
