@@ -500,6 +500,175 @@ void ReplicationState::trigger_immediate_config_refresh() {
     LOG(INFO) << "Immediate configuration refresh requested due to peer failure";
 }
 
+bool ReplicationState::add_node_safe(const std::string& node_to_add) {
+    std::unique_lock config_lock(current_config_mutex);
+    
+    if (current_node_config.empty()) {
+        LOG(ERROR) << "Cannot add node: no current configuration available";
+        return false;
+    }
+    
+    // Check if configuration is safe for changes
+    if (!is_config_safe_for_changes()) {
+        LOG(ERROR) << "Cannot add node: current configuration is not safe for changes";
+        return false;
+    }
+    
+    // Check if node already exists
+    if (std::find(current_node_config.hostname_nodes.begin(), 
+                  current_node_config.hostname_nodes.end(), node_to_add) != current_node_config.hostname_nodes.end() ||
+        std::find(current_node_config.ip_nodes.begin(), 
+                  current_node_config.ip_nodes.end(), node_to_add) != current_node_config.ip_nodes.end()) {
+        LOG(WARNING) << "Node already exists in configuration: " << node_to_add;
+        return false;
+    }
+    
+    // Create new configuration with single node addition
+    uint64_t current_term = get_current_term();
+    NodeConfiguration new_config = current_node_config.create_single_node_change(
+        node_to_add, "", current_term);
+    
+    // Validate the change is safe
+    if (!current_node_config.is_safe_single_node_change(new_config)) {
+        LOG(ERROR) << "Unsafe configuration change detected when adding node: " << node_to_add;
+        return false;
+    }
+    
+    // Update current configuration
+    current_node_config = new_config;
+    current_nodes_config_str = new_config.serialize();
+    
+    LOG(INFO) << "Successfully added node: " << node_to_add 
+              << " (config version: " << new_config.config_version 
+              << ", term: " << new_config.config_term << ")";
+    
+    // Trigger immediate refresh to apply the change
+    config_lock.unlock();
+    trigger_immediate_config_refresh();
+    
+    return true;
+}
+
+bool ReplicationState::remove_node_safe(const std::string& node_to_remove) {
+    std::unique_lock config_lock(current_config_mutex);
+    
+    if (current_node_config.empty()) {
+        LOG(ERROR) << "Cannot remove node: no current configuration available";
+        return false;
+    }
+    
+    // Check if configuration is safe for changes
+    if (!is_config_safe_for_changes()) {
+        LOG(ERROR) << "Cannot remove node: current configuration is not safe for changes";
+        return false;
+    }
+    
+    // Check if node exists
+    bool node_exists = (std::find(current_node_config.hostname_nodes.begin(), 
+                                 current_node_config.hostname_nodes.end(), node_to_remove) != current_node_config.hostname_nodes.end()) ||
+                      (std::find(current_node_config.ip_nodes.begin(), 
+                                 current_node_config.ip_nodes.end(), node_to_remove) != current_node_config.ip_nodes.end());
+    
+    if (!node_exists) {
+        LOG(WARNING) << "Node does not exist in configuration: " << node_to_remove;
+        return false;
+    }
+    
+    // Prevent removing the last node
+    if (current_node_config.total_nodes() <= 1) {
+        LOG(ERROR) << "Cannot remove the last node in the cluster";
+        return false;
+    }
+    
+    // Create new configuration with single node removal
+    uint64_t current_term = get_current_term();
+    NodeConfiguration new_config = current_node_config.create_single_node_change(
+        "", node_to_remove, current_term);
+    
+    // Validate the change is safe
+    if (!current_node_config.is_safe_single_node_change(new_config)) {
+        LOG(ERROR) << "Unsafe configuration change detected when removing node: " << node_to_remove;
+        return false;
+    }
+    
+    // Update current configuration
+    current_node_config = new_config;
+    current_nodes_config_str = new_config.serialize();
+    
+    LOG(INFO) << "Successfully removed node: " << node_to_remove 
+              << " (config version: " << new_config.config_version 
+              << ", term: " << new_config.config_term << ")";
+    
+    // Trigger immediate refresh to apply the change
+    config_lock.unlock();
+    trigger_immediate_config_refresh();
+    
+    return true;
+}
+
+bool ReplicationState::is_config_safe_for_changes() const {
+    std::shared_lock lock(node_mutex);
+    
+    if (!node) {
+        LOG(DEBUG) << "Node not initialized, configuration not safe for changes";
+        return false;
+    }
+    
+    // Only leader can make configuration changes
+    if (!node->is_leader()) {
+        LOG(DEBUG) << "Node is not leader, configuration not safe for changes";
+        return false;
+    }
+    
+    braft::NodeStatus status;
+    node->get_status(&status);
+    
+    // Check if we have a stable term (no ongoing elections)
+    if (status.state != braft::STATE_LEADER) {
+        LOG(DEBUG) << "Node state is not stable leader, configuration not safe for changes";
+        return false;
+    }
+    
+    // Check if we have committed entries in the current term
+    // This ensures we have established leadership in this term
+    if (status.committed_index == 0) {
+        LOG(DEBUG) << "No committed entries, configuration not safe for changes";
+        return false;
+    }
+    
+    // Additional safety: check if we have a quorum
+    std::shared_lock config_lock(current_config_mutex);
+    size_t total_nodes = current_node_config.total_nodes();
+    if (total_nodes == 0) {
+        LOG(DEBUG) << "No nodes in configuration, not safe for changes";
+        return false;
+    }
+    
+    // For a cluster to be safe for changes, we need to ensure we can maintain quorum
+    size_t quorum_size = (total_nodes / 2) + 1;
+    if (quorum_size < 2) {
+        LOG(DEBUG) << "Cluster too small for safe configuration changes";
+        return false;
+    }
+    
+    LOG(DEBUG) << "Configuration is safe for changes (nodes: " << total_nodes 
+               << ", quorum: " << quorum_size << ", committed: " << status.committed_index << ")";
+    
+    return true;
+}
+
+uint64_t ReplicationState::get_current_term() const {
+    std::shared_lock lock(node_mutex);
+    
+    if (!node) {
+        return 0;
+    }
+    
+    braft::NodeStatus status;
+    node->get_status(&status);
+    return static_cast<uint64_t>(status.term);
+}
+
 Option<bool> ReplicationState::handle_gzip(const std::shared_ptr<http_req>& request) {
     if (!request->zstream_initialized) {
         request->zs.zalloc = Z_NULL;
@@ -1011,6 +1180,26 @@ void ReplicationState::refresh_nodes(const std::string & nodes, const size_t raf
     // Store current configuration for failure handling
     {
         std::unique_lock config_lock(current_config_mutex);
+        // Preserve version information if this is an update to existing config
+        if (!current_node_config.empty() && parsed_config.total_nodes() != current_node_config.total_nodes()) {
+            // Configuration changed, increment version
+            parsed_config.config_version = current_node_config.config_version + 1;
+            parsed_config.config_term = get_current_term();
+            parsed_config.created_at = std::chrono::steady_clock::now();
+            LOG(INFO) << "Configuration change detected, incremented version to " 
+                      << parsed_config.config_version << " (term: " << parsed_config.config_term << ")";
+        } else if (current_node_config.empty()) {
+            // First time initialization
+            parsed_config.config_term = get_current_term();
+            LOG(INFO) << "Initializing configuration version " << parsed_config.config_version 
+                      << " (term: " << parsed_config.config_term << ")";
+        } else {
+            // No change, preserve existing version info
+            parsed_config.config_version = current_node_config.config_version;
+            parsed_config.config_term = current_node_config.config_term;
+            parsed_config.created_at = current_node_config.created_at;
+        }
+        
         current_node_config = parsed_config;
         current_nodes_config_str = nodes;
     }

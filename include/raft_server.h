@@ -9,6 +9,9 @@
 #include <rocksdb/db.h>
 #include <future>
 #include <shared_mutex>
+#include <chrono>
+#include <regex>
+#include <algorithm>
 
 #include "http_data.h"
 #include "threadpool.h"
@@ -23,10 +26,16 @@ class ReplicationState;
 /**
  * Represents a parsed node configuration with separate collections for hostnames and IPs.
  * This provides clear separation between hostname-based and IP-based peer configurations.
+ * Includes versioning for safe configuration changes (inspired by MongoDB's TLA+ specs).
  */
 struct NodeConfiguration {
     std::vector<std::string> hostname_nodes;  // e.g., "node1.example.com:8107:8108"
     std::vector<std::string> ip_nodes;        // e.g., "192.168.1.1:8107:8108"
+    
+    // Configuration versioning for safe changes (MongoDB TLA+ pattern)
+    uint64_t config_version = 1;              // Incremented on each config change
+    uint64_t config_term = 0;                 // Term when this config was created
+    std::chrono::steady_clock::time_point created_at = std::chrono::steady_clock::now();
     
     bool has_hostnames() const { return !hostname_nodes.empty(); }
     bool has_ips() const { return !ip_nodes.empty(); }
@@ -34,13 +43,131 @@ struct NodeConfiguration {
     size_t total_nodes() const { return hostname_nodes.size() + ip_nodes.size(); }
     
     /**
+     * Check if this configuration is newer than another (MongoDB TLA+ pattern).
+     * Compares by (config_term, config_version) tuple.
+     */
+    bool is_newer_than(const NodeConfiguration& other) const {
+        return config_term > other.config_term || 
+               (config_term == other.config_term && config_version > other.config_version);
+    }
+    
+    /**
+     * Create a new configuration version for a single-node change.
+     * This implements MongoDB's safe single-node membership change pattern.
+     */
+    NodeConfiguration create_single_node_change(const std::string& node_to_add, 
+                                               const std::string& node_to_remove,
+                                               uint64_t current_term) const {
+        NodeConfiguration new_config = *this;
+        new_config.config_version++;
+        new_config.config_term = current_term;
+        new_config.created_at = std::chrono::steady_clock::now();
+        
+        // Remove node if specified
+        if (!node_to_remove.empty()) {
+            auto& hostname_nodes = new_config.hostname_nodes;
+            auto& ip_nodes = new_config.ip_nodes;
+            
+            hostname_nodes.erase(
+                std::remove(hostname_nodes.begin(), hostname_nodes.end(), node_to_remove),
+                hostname_nodes.end());
+            ip_nodes.erase(
+                std::remove(ip_nodes.begin(), ip_nodes.end(), node_to_remove),
+                ip_nodes.end());
+        }
+        
+        // Add node if specified
+        if (!node_to_add.empty()) {
+            // Determine if it's a hostname or IP and add to appropriate collection
+            if (is_hostname_node(node_to_add)) {
+                new_config.hostname_nodes.push_back(node_to_add);
+            } else {
+                new_config.ip_nodes.push_back(node_to_add);
+            }
+        }
+        
+        return new_config;
+    }
+    
+    /**
+     * Validate that a configuration change is safe (single node only).
+     * Implements MongoDB's single-node change safety rule.
+     */
+    bool is_safe_single_node_change(const NodeConfiguration& new_config) const {
+        size_t old_total = total_nodes();
+        size_t new_total = new_config.total_nodes();
+        
+        // Must be exactly +1 or -1 node change
+        if (std::abs(static_cast<int>(new_total) - static_cast<int>(old_total)) != 1) {
+            return false;
+        }
+        
+        // Count actual differences
+        size_t differences = 0;
+        
+        // Check hostname nodes
+        for (const auto& node : hostname_nodes) {
+            if (std::find(new_config.hostname_nodes.begin(), 
+                         new_config.hostname_nodes.end(), node) == new_config.hostname_nodes.end()) {
+                differences++;
+            }
+        }
+        for (const auto& node : new_config.hostname_nodes) {
+            if (std::find(hostname_nodes.begin(), hostname_nodes.end(), node) == hostname_nodes.end()) {
+                differences++;
+            }
+        }
+        
+        // Check IP nodes
+        for (const auto& node : ip_nodes) {
+            if (std::find(new_config.ip_nodes.begin(), 
+                         new_config.ip_nodes.end(), node) == new_config.ip_nodes.end()) {
+                differences++;
+            }
+        }
+        for (const auto& node : new_config.ip_nodes) {
+            if (std::find(ip_nodes.begin(), ip_nodes.end(), node) == ip_nodes.end()) {
+                differences++;
+            }
+        }
+        
+        // Should have exactly 1 difference (1 add OR 1 remove)
+        return differences == 1;
+    }
+    
+    /**
      * Serialize back to the original format for persistence and logging.
+     * Includes version metadata in comments for debugging.
      */
     std::string serialize() const {
         std::vector<std::string> all_nodes;
         all_nodes.insert(all_nodes.end(), hostname_nodes.begin(), hostname_nodes.end());
         all_nodes.insert(all_nodes.end(), ip_nodes.begin(), ip_nodes.end());
         return StringUtils::join(all_nodes, ",");
+    }
+    
+    /**
+     * Serialize with version metadata for debugging and monitoring.
+     */
+    std::string serialize_with_metadata() const {
+        return serialize() + " # version=" + std::to_string(config_version) + 
+               " term=" + std::to_string(config_term);
+    }
+
+private:
+    /**
+     * Helper to determine if a node string represents a hostname or IP.
+     */
+    bool is_hostname_node(const std::string& node_str) const {
+        if (node_str.find('[') == 0) return false;  // IPv6
+        
+        std::vector<std::string> parts;
+        StringUtils::split(node_str, parts, ":");
+        if (parts.size() != 3) return false;
+        
+        const std::string& host = parts[0];
+        // Check if it's an IPv4 address
+        return !std::regex_match(host, std::regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"));
     }
 };
 
@@ -309,6 +436,29 @@ public:
      * Trigger immediate cluster configuration refresh (bypasses the 10s timer)
      */
     void trigger_immediate_config_refresh();
+
+    /**
+     * Safely add a single node to the cluster (MongoDB TLA+ pattern).
+     * This prevents dangerous multi-node changes that could split quorums.
+     */
+    bool add_node_safe(const std::string& node_to_add);
+
+    /**
+     * Safely remove a single node from the cluster (MongoDB TLA+ pattern).
+     * This prevents dangerous multi-node changes that could split quorums.
+     */
+    bool remove_node_safe(const std::string& node_to_remove);
+
+    /**
+     * Check if the current configuration is safe for making changes.
+     * Implements MongoDB's ConfigIsSafe pattern from TLA+ specs.
+     */
+    bool is_config_safe_for_changes() const;
+
+    /**
+     * Get the current Raft term for configuration versioning.
+     */
+    uint64_t get_current_term() const;
 
     int64_t get_num_queued_writes();
 
