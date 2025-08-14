@@ -3,6 +3,7 @@
 #include <butil/files/file_enumerator.h>
 #include <thread>
 #include <algorithm>
+#include <regex>
 #include <string_utils.h>
 #include <file_utils.h>
 #include <collection_manager.h>
@@ -52,7 +53,10 @@ int ReplicationState::start(const butil::EndPoint & peering_endpoint, const int 
             continue;
         }
 
-        if(node_options.initial_conf.parse_from(actual_nodes_config) != 0) {
+        // Parse and convert node configuration to braft format
+        NodeConfiguration parsed_config = parse_node_configuration(actual_nodes_config);
+        node_options.initial_conf = node_config_to_braft(parsed_config);
+        if(node_options.initial_conf.empty()) {
             if(--max_tries == 0) {
                 LOG(ERROR) << "Giving up parsing nodes configuration: `" << nodes << "`";
                 return -1;
@@ -152,7 +156,8 @@ std::string ReplicationState::to_nodes_config(const butil::EndPoint& peering_end
         // endpoint2str gives us "<ip>:<peering_port>", we just need to add ":<api_port>"
         return std::string(butil::endpoint2str(peering_endpoint).c_str()) + ":" + std::to_string(api_port);
     } else {
-        return resolve_node_hosts(nodes_config);
+        NodeConfiguration parsed_config = parse_node_configuration(nodes_config);
+        return parsed_config.serialize();
     }
 }
 
@@ -167,6 +172,11 @@ std::string ReplicationState::hostname2ipstr(const std::string& hostname) {
         return hostname;
     }
 
+    // Check if this is already an IPv4 address by looking for digits and dots
+    if(std::regex_match(hostname, std::regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"))) {
+        return hostname;
+    }
+
     struct addrinfo hints, *result;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;     // Allow both IPv4 and IPv6
@@ -175,7 +185,7 @@ std::string ReplicationState::hostname2ipstr(const std::string& hostname) {
     int status = getaddrinfo(hostname.c_str(), nullptr, &hints, &result);
     if (status != 0) {
         LOG(ERROR) << "Unable to resolve host: " << hostname << ", error: " << gai_strerror(status);
-        return hostname; // Return original hostname on error
+        return hostname; // Return original hostname on error - this allows fallback behavior
     }
 
     char ip_str[INET6_ADDRSTRLEN];
@@ -187,58 +197,173 @@ std::string ReplicationState::hostname2ipstr(const std::string& hostname) {
         struct sockaddr_in *addr = (struct sockaddr_in *)result->ai_addr;
         inet_ntop(AF_INET, &(addr->sin_addr), ip_str, INET_ADDRSTRLEN);
         resolved_ip = ip_str;
+        LOG(INFO) << "Resolved hostname " << hostname << " to IPv4: " << resolved_ip;
     } else if (result->ai_family == AF_INET6) {
         // IPv6
         struct sockaddr_in6 *addr = (struct sockaddr_in6 *)result->ai_addr;
         inet_ntop(AF_INET6, &(addr->sin6_addr), ip_str, INET6_ADDRSTRLEN);
         resolved_ip = std::string("[") + ip_str + "]";
+        LOG(INFO) << "Resolved hostname " << hostname << " to IPv6: " << resolved_ip;
     }
 
     freeaddrinfo(result);
 
     if(resolved_ip.empty()) {
+        LOG(WARNING) << "DNS resolution for " << hostname << " did not produce a valid IP, returning hostname";
         return hostname; // Return original hostname if resolution didn't produce a valid IP
     }
 
     return resolved_ip;
 }
 
-std::string ReplicationState::resolve_node_hosts(const string& nodes_config) {
-    std::vector<std::string> final_nodes_vec;
+NodeConfiguration ReplicationState::parse_node_configuration(const string& nodes_config) {
+    NodeConfiguration config;
+
+    if(nodes_config.empty()) {
+        return config;
+    }
+
     std::vector<std::string> node_strings;
     StringUtils::split(nodes_config, node_strings, ",");
 
     for(const auto& node_str: node_strings) {
         // Check if this is already an IPv6 address node by looking for []
         if(node_str.find('[') == 0) {
-            final_nodes_vec.push_back(node_str);
+            config.ip_nodes.push_back(node_str);
+            LOG(INFO) << "Added IPv6 IP node: " << node_str;
             continue;
         }
 
-        // could be an IP or a hostname that must be resolved
         std::vector<std::string> node_parts;
         StringUtils::split(node_str, node_parts, ":");
 
         if(node_parts.size() != 3) {
-            final_nodes_vec.push_back(node_str);
+            // Malformed node string, but keep it in IP nodes for backward compatibility
+            config.ip_nodes.push_back(node_str);
+            LOG(WARNING) << "Malformed node configuration, treating as IP: " << node_str;
             continue;
         }
 
-        std::string resolved_ip = hostname2ipstr(node_parts[0]);
-        if(resolved_ip.empty()) {
-            LOG(ERROR) << "Unable to resolve host: " << node_parts[0];
+        const std::string& host = node_parts[0];
+
+        // Check if this is already an IPv4 address
+        if(std::regex_match(host, std::regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"))) {
+            // Already an IPv4 address, store in IP collection
+            config.ip_nodes.push_back(node_str);
+            LOG(INFO) << "Added IPv4 IP node: " << node_str;
             continue;
         }
 
-        final_nodes_vec.push_back(resolved_ip + ":" + node_parts[1] + ":" + node_parts[2]);
+        // This is a hostname - validate that it can be resolved
+        std::string resolved_ip = hostname2ipstr(host);
+        if(resolved_ip.empty() || resolved_ip == host) {
+            LOG(ERROR) << "Unable to resolve hostname: " << host << ", skipping this peer";
+            continue;
+        }
+
+        // Hostname resolves successfully, store in hostname collection
+        config.hostname_nodes.push_back(node_str);
+        LOG(INFO) << "Added hostname node: " << host << " (resolves to " << resolved_ip << ")";
     }
 
-    if(final_nodes_vec.empty()) {
-        return "";
+    LOG(INFO) << "Parsed node configuration: " << config.hostname_nodes.size() 
+              << " hostname nodes, " << config.ip_nodes.size() << " IP nodes";
+
+    return config;
+}
+
+braft::Configuration ReplicationState::node_config_to_braft(const NodeConfiguration& node_config) {
+    braft::Configuration conf;
+
+    if (node_config.empty()) {
+        return conf;
     }
 
-    std::string final_nodes_config = StringUtils::join(final_nodes_vec, ",");
-    return final_nodes_config;
+    // Process IP-based nodes first (no DNS resolution needed)
+    for (const auto& node_str : node_config.ip_nodes) {
+        // Handle IPv6 addresses
+        if (node_str.find('[') == 0) {
+            braft::PeerId peer_id;
+            if (peer_id.parse(node_str) == 0) {
+                conf.add_peer(peer_id);
+                LOG(INFO) << "Added IPv6 peer: " << peer_id;
+            } else {
+                LOG(ERROR) << "Failed to parse IPv6 node: " << node_str;
+            }
+            continue;
+        }
+
+        std::vector<std::string> node_parts;
+        StringUtils::split(node_str, node_parts, ":");
+
+        if (node_parts.size() != 3) {
+            LOG(WARNING) << "Invalid IP node format: " << node_str;
+            continue;
+        }
+
+        const std::string& ip = node_parts[0];
+        int peering_port, api_port;
+
+        try {
+            peering_port = std::stoi(node_parts[1]);
+            api_port = std::stoi(node_parts[2]);
+        } catch (const std::exception& e) {
+            LOG(ERROR) << "Invalid port numbers in IP node: " << node_str;
+            continue;
+        }
+
+        // Create braft::PeerId directly with IP
+        butil::EndPoint endpoint;
+        if (butil::str2endpoint(ip.c_str(), peering_port, &endpoint) == 0) {
+            braft::PeerId peer_id(endpoint, api_port);
+            conf.add_peer(peer_id);
+            LOG(INFO) << "Added IP peer: " << peer_id;
+        } else {
+            LOG(ERROR) << "Failed to create endpoint for IP: " << ip << ":" << peering_port;
+        }
+    }
+
+    // Process hostname-based nodes (requires DNS resolution)
+    for (const auto& node_str : node_config.hostname_nodes) {
+        std::vector<std::string> node_parts;
+        StringUtils::split(node_str, node_parts, ":");
+
+        if (node_parts.size() != 3) {
+            LOG(WARNING) << "Invalid hostname node format: " << node_str;
+            continue;
+        }
+
+        const std::string& hostname = node_parts[0];
+        int peering_port, api_port;
+
+        try {
+            peering_port = std::stoi(node_parts[1]);
+            api_port = std::stoi(node_parts[2]);
+        } catch (const std::exception& e) {
+            LOG(ERROR) << "Invalid port numbers in hostname node: " << node_str;
+            continue;
+        }
+
+        // Resolve hostname to IP for braft (fresh resolution every time)
+        std::string resolved_ip = hostname2ipstr(hostname);
+        if (resolved_ip.empty() || resolved_ip == hostname) {
+            LOG(WARNING) << "Failed to resolve hostname " << hostname << " for braft configuration";
+            continue;
+        }
+
+        // Create braft::PeerId with resolved IP
+        butil::EndPoint endpoint;
+        if (butil::str2endpoint(resolved_ip.c_str(), peering_port, &endpoint) == 0) {
+            braft::PeerId peer_id(endpoint, api_port);
+            conf.add_peer(peer_id);
+            LOG(INFO) << "Added resolved hostname peer: " << hostname << " -> " << peer_id;
+        } else {
+            LOG(ERROR) << "Failed to create endpoint for resolved IP: " << resolved_ip << ":" << peering_port;
+        }
+    }
+
+    LOG(INFO) << "Created braft configuration with " << conf.size() << " total peers";
+    return conf;
 }
 
 Option<bool> ReplicationState::handle_gzip(const std::shared_ptr<http_req>& request) {
@@ -745,8 +870,9 @@ void ReplicationState::refresh_nodes(const std::string & nodes, const size_t raf
         return ;
     }
 
-    braft::Configuration new_conf;
-    new_conf.parse_from(nodes);
+    // Parse and convert node configuration with fresh DNS resolution
+    NodeConfiguration parsed_config = parse_node_configuration(nodes);
+    braft::Configuration new_conf = node_config_to_braft(parsed_config);
 
     braft::NodeStatus nodeStatus;
     node->get_status(&nodeStatus);
@@ -1014,8 +1140,8 @@ bool ReplicationState::reset_peers() {
             return false;
         }
 
-        braft::Configuration peer_config;
-        peer_config.parse_from(nodes_config);
+        NodeConfiguration parsed_config = parse_node_configuration(nodes_config);
+        braft::Configuration peer_config = node_config_to_braft(parsed_config);
 
         std::vector<braft::PeerId> peers;
         peer_config.list_peers(&peers);

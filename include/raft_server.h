@@ -14,9 +14,34 @@
 #include "http_server.h"
 #include "batched_indexer.h"
 #include "cached_resource_stat.h"
+#include "string_utils.h"
 
 class Store;
 class ReplicationState;
+
+/**
+ * Represents a parsed node configuration with separate collections for hostnames and IPs.
+ * This provides clear separation between hostname-based and IP-based peer configurations.
+ */
+struct NodeConfiguration {
+    std::vector<std::string> hostname_nodes;  // e.g., "node1.example.com:8107:8108"
+    std::vector<std::string> ip_nodes;        // e.g., "192.168.1.1:8107:8108"
+    
+    bool has_hostnames() const { return !hostname_nodes.empty(); }
+    bool has_ips() const { return !ip_nodes.empty(); }
+    bool empty() const { return hostname_nodes.empty() && ip_nodes.empty(); }
+    size_t total_nodes() const { return hostname_nodes.size() + ip_nodes.size(); }
+    
+    /**
+     * Serialize back to the original format for persistence and logging.
+     */
+    std::string serialize() const {
+        std::vector<std::string> all_nodes;
+        all_nodes.insert(all_nodes.end(), hostname_nodes.begin(), hostname_nodes.end());
+        all_nodes.insert(all_nodes.end(), ip_nodes.begin(), ip_nodes.end());
+        return StringUtils::join(all_nodes, ",");
+    }
+};
 
 // Implements the callback for the state machine
 class ReplicationClosure : public braft::Closure {
@@ -245,7 +270,17 @@ public:
      */
     static std::string hostname2ipstr(const std::string& hostname);
 
-    static std::string resolve_node_hosts(const std::string& nodes_config);
+    /**
+     * Parse node configuration string into separate hostname and IP collections.
+     * This replaces resolve_node_hosts() with a cleaner separation of concerns.
+     */
+    static NodeConfiguration parse_node_configuration(const std::string& nodes_config);
+
+    /**
+     * Convert NodeConfiguration to braft::Configuration with DNS resolution.
+     * This resolves hostnames to IPs and creates braft peer objects.
+     */
+    static braft::Configuration node_config_to_braft(const NodeConfiguration& node_config);
 
     int64_t get_num_queued_writes();
 
