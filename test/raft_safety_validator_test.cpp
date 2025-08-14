@@ -1,20 +1,13 @@
 #include <gtest/gtest.h>
-#include <gmock/gmock.h>
 #include "raft_server.h"
 
 // Unit Tests for raft_safety_validator.cpp
 // Tests MongoDB TLA+ safety patterns and peer failure handling
 
-class MockBraftNode {
-public:
-    MOCK_METHOD(void, get_status, (braft::NodeStatus* status), ());
-    MOCK_METHOD(bool, is_leader, (), ());
-    MOCK_METHOD(braft::PeerId, leader_id, (), ());
-};
-
 class RaftSafetyValidatorTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Create ReplicationState with null dependencies - tests should work without full setup
         repl_state = std::make_unique<ReplicationState>(nullptr, nullptr, "", 0);
         
         // Test configurations

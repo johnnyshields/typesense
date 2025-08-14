@@ -1,20 +1,14 @@
 #include <gtest/gtest.h>
-#include <gmock/gmock.h>
 #include "raft_server.h"
 #include "http_data.h"
 
 // Unit Tests for raft_http_handler.cpp
 // Tests HTTP request processing, GZIP handling, and leader forwarding
 
-class MockHttpClient {
-public:
-    MOCK_METHOD(std::string, get_response, (const std::string& url, long timeout_ms, const std::string& api_key), ());
-    MOCK_METHOD(std::string, post_response, (const std::string& url, const std::string& body, const std::string& content_type, long timeout_ms, const std::string& api_key), ());
-};
-
 class RaftHttpHandlerTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Create ReplicationState with null dependencies - tests should work without full setup
         repl_state = std::make_unique<ReplicationState>(nullptr, nullptr, "", 0);
         
         // Create mock HTTP request and response
