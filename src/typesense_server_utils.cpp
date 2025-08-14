@@ -420,8 +420,16 @@ int start_raft_server(ReplicationState& replication_state, Store& store,
     // Wait until 'CTRL-C' is pressed. then Stop() and Join() the service
     size_t raft_counter = 0;
     while (!brpc::IsAskedToQuit() && !quit_raft_service.load()) {
-        if(raft_counter % 10 == 0) {
+        // Check for immediate refresh request (failure-triggered DNS re-resolution)
+        bool should_refresh_now = replication_state.immediate_refresh_requested.load(std::memory_order_acquire);
+        if (should_refresh_now) {
+            replication_state.immediate_refresh_requested.store(false, std::memory_order_release);
+            LOG(INFO) << "Processing immediate configuration refresh due to peer failure";
+        }
+        
+        if(raft_counter % 10 == 0 || should_refresh_now) {
             // reset peer configuration periodically to identify change in cluster membership
+            // OR immediately when requested due to peer failure
             const Option<std::string> & refreshed_nodes_op = Config::fetch_nodes_config(path_to_nodes);
             if(!refreshed_nodes_op.ok()) {
                 LOG(WARNING) << "Error while refreshing peer configuration: " << refreshed_nodes_op.error();

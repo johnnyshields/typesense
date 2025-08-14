@@ -366,6 +366,140 @@ braft::Configuration ReplicationState::node_config_to_braft(const NodeConfigurat
     return conf;
 }
 
+std::string ReplicationState::extract_hostname_from_node(const std::string& node_str) {
+    if (node_str.find('[') == 0) {
+        // IPv6 format, no hostname
+        return "";
+    }
+    
+    std::vector<std::string> node_parts;
+    StringUtils::split(node_str, node_parts, ":");
+    
+    if (node_parts.size() != 3) {
+        return "";
+    }
+    
+    const std::string& host = node_parts[0];
+    
+    // Check if it's an IP address (not a hostname)
+    if (std::regex_match(host, std::regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"))) {
+        return "";  // It's an IP, not a hostname
+    }
+    
+    return host;  // It's a hostname
+}
+
+bool ReplicationState::peer_matches_hostname_node(const braft::PeerId& peer_id, const std::string& hostname_node) {
+    std::string hostname = extract_hostname_from_node(hostname_node);
+    if (hostname.empty()) {
+        return false;  // Not a hostname node
+    }
+    
+    // Extract port from hostname_node
+    std::vector<std::string> node_parts;
+    StringUtils::split(hostname_node, node_parts, ":");
+    if (node_parts.size() != 3) {
+        return false;
+    }
+    
+    int expected_peering_port, expected_api_port;
+    try {
+        expected_peering_port = std::stoi(node_parts[1]);
+        expected_api_port = std::stoi(node_parts[2]);
+    } catch (const std::exception& e) {
+        return false;
+    }
+    
+    // Check if ports match
+    if (peer_id.addr.port != expected_peering_port || peer_id.idx != expected_api_port) {
+        return false;
+    }
+    
+    // Resolve hostname and check if IP matches
+    std::string resolved_ip = hostname2ipstr(hostname);
+    if (resolved_ip.empty() || resolved_ip == hostname) {
+        return false;  // Couldn't resolve
+    }
+    
+    // Compare resolved IP with peer's IP
+    butil::EndPoint resolved_endpoint;
+    if (butil::str2endpoint(resolved_ip.c_str(), expected_peering_port, &resolved_endpoint) != 0) {
+        return false;
+    }
+    
+    return resolved_endpoint.ip == peer_id.addr.ip;
+}
+
+void ReplicationState::handle_peer_failure(const braft::PeerId& failed_peer_id) {
+    std::shared_lock config_lock(current_config_mutex);
+    
+    if (current_node_config.empty()) {
+        LOG(DEBUG) << "No current config available for peer failure handling";
+        return;
+    }
+    
+    // Check if the failed peer corresponds to any hostname-based nodes
+    bool hostname_peer_failed = false;
+    std::string failed_hostname_node;
+    
+    for (const auto& hostname_node : current_node_config.hostname_nodes) {
+        if (peer_matches_hostname_node(failed_peer_id, hostname_node)) {
+            hostname_peer_failed = true;
+            failed_hostname_node = hostname_node;
+            break;
+        }
+    }
+    
+    config_lock.unlock();
+    
+    if (!hostname_peer_failed) {
+        LOG(DEBUG) << "Failed peer " << failed_peer_id << " is not hostname-based, no DNS re-resolution needed";
+        return;
+    }
+    
+    LOG(INFO) << "Hostname-based peer failed: " << failed_peer_id << " (hostname node: " << failed_hostname_node << ")";
+    
+    // Attempt immediate DNS re-resolution
+    std::string hostname = extract_hostname_from_node(failed_hostname_node);
+    if (hostname.empty()) {
+        LOG(WARNING) << "Could not extract hostname from node: " << failed_hostname_node;
+        return;
+    }
+    
+    LOG(INFO) << "Attempting immediate DNS re-resolution for failed hostname: " << hostname;
+    std::string new_resolved_ip = hostname2ipstr(hostname);
+    
+    if (new_resolved_ip.empty() || new_resolved_ip == hostname) {
+        LOG(WARNING) << "Immediate DNS re-resolution failed for hostname: " << hostname;
+        return;
+    }
+    
+    // Check if the IP actually changed
+    butil::EndPoint old_endpoint = failed_peer_id.addr;
+    butil::EndPoint new_endpoint;
+    if (butil::str2endpoint(new_resolved_ip.c_str(), old_endpoint.port, &new_endpoint) != 0) {
+        LOG(ERROR) << "Failed to create endpoint for newly resolved IP: " << new_resolved_ip;
+        return;
+    }
+    
+    if (old_endpoint.ip == new_endpoint.ip) {
+        LOG(INFO) << "DNS re-resolution returned same IP for " << hostname << ", no config change needed";
+        return;
+    }
+    
+    LOG(INFO) << "DNS re-resolution detected IP change for " << hostname 
+              << ": " << butil::endpoint2str(old_endpoint).c_str() 
+              << " -> " << butil::endpoint2str(new_endpoint).c_str();
+    
+    // Trigger immediate configuration refresh
+    trigger_immediate_config_refresh();
+}
+
+void ReplicationState::trigger_immediate_config_refresh() {
+    immediate_refresh_requested.store(true, std::memory_order_release);
+    LOG(INFO) << "Immediate configuration refresh requested due to peer failure";
+}
+
 Option<bool> ReplicationState::handle_gzip(const std::shared_ptr<http_req>& request) {
     if (!request->zstream_initialized) {
         request->zs.zalloc = Z_NULL;
@@ -874,6 +1008,13 @@ void ReplicationState::refresh_nodes(const std::string & nodes, const size_t raf
     NodeConfiguration parsed_config = parse_node_configuration(nodes);
     braft::Configuration new_conf = node_config_to_braft(parsed_config);
 
+    // Store current configuration for failure handling
+    {
+        std::unique_lock config_lock(current_config_mutex);
+        current_node_config = parsed_config;
+        current_nodes_config_str = nodes;
+    }
+
     braft::NodeStatus nodeStatus;
     node->get_status(&nodeStatus);
 
@@ -886,6 +1027,39 @@ void ReplicationState::refresh_nodes(const std::string & nodes, const size_t raf
               << ", pending_writes: " << pending_writes
               << ", queued_writes: " << batched_indexer->get_queued_writes()
               << ", local_sequence: " << store->get_latest_seq_number();
+
+    // Check for unreachable peers that might need DNS re-resolution
+    std::vector<braft::PeerId> current_peers;
+    braft::Configuration current_conf;
+    node->list_peers(&current_peers);
+    
+    for (const auto& peer : current_peers) {
+        // Check if this peer corresponds to a hostname node that might have changed IP
+        std::shared_lock config_lock(current_config_mutex);
+        for (const auto& hostname_node : current_node_config.hostname_nodes) {
+            if (peer_matches_hostname_node(peer, hostname_node)) {
+                // This is a hostname-based peer - verify it's still reachable at current IP
+                std::string hostname = extract_hostname_from_node(hostname_node);
+                if (!hostname.empty()) {
+                    std::string current_resolved_ip = hostname2ipstr(hostname);
+                    if (!current_resolved_ip.empty() && current_resolved_ip != hostname) {
+                        butil::EndPoint current_endpoint;
+                        if (butil::str2endpoint(current_resolved_ip.c_str(), peer.addr.port, &current_endpoint) == 0) {
+                            if (current_endpoint.ip != peer.addr.ip) {
+                                LOG(INFO) << "Detected IP change for hostname " << hostname 
+                                          << ": " << butil::endpoint2str(peer.addr).c_str() 
+                                          << " -> " << butil::endpoint2str(current_endpoint).c_str();
+                                config_lock.unlock();
+                                // IP changed, this refresh should pick up the new configuration
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        config_lock.unlock();
+    }
 
     if(node->is_leader()) {
         RefreshNodesClosure* refresh_nodes_done = new RefreshNodesClosure;
@@ -1030,7 +1204,8 @@ ReplicationState::ReplicationState(HttpServer* server, BatchedIndexer* batched_i
         num_documents_parallel_load(num_documents_parallel_load),
         read_caught_up(false), write_caught_up(false),
         ready(false), shutting_down(false), pending_writes(0), snapshot_in_progress(false),
-        last_snapshot_ts(std::time(nullptr)), snapshot_interval_s(config->get_snapshot_interval_seconds()) {
+        last_snapshot_ts(std::time(nullptr)), snapshot_interval_s(config->get_snapshot_interval_seconds()),
+        immediate_refresh_requested(false) {
 
 }
 

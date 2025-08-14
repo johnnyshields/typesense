@@ -8,6 +8,7 @@
 #include <braft/protobuf_file.h>         // braft::ProtoBufFile
 #include <rocksdb/db.h>
 #include <future>
+#include <shared_mutex>
 
 #include "http_data.h"
 #include "threadpool.h"
@@ -175,6 +176,12 @@ private:
 
     butil::EndPoint peering_endpoint;
 
+    // DNS failure handling and immediate re-resolution
+    mutable std::shared_mutex current_config_mutex;
+    NodeConfiguration current_node_config;
+    std::string current_nodes_config_str;
+    std::atomic<bool> immediate_refresh_requested;
+
 public:
 
     static constexpr const char* log_dir_name = "log";
@@ -282,6 +289,27 @@ public:
      */
     static braft::Configuration node_config_to_braft(const NodeConfiguration& node_config);
 
+    /**
+     * Handle peer connection failure with immediate DNS re-resolution for hostname peers.
+     * This dramatically reduces disaster recovery time by not waiting for the 10s refresh cycle.
+     */
+    void handle_peer_failure(const braft::PeerId& failed_peer_id);
+
+    /**
+     * Extract hostname from a hostname-based node string (e.g., "node1.example.com:8107:8108" -> "node1.example.com")
+     */
+    static std::string extract_hostname_from_node(const std::string& node_str);
+
+    /**
+     * Check if a braft::PeerId corresponds to a hostname-based node by comparing resolved IPs
+     */
+    bool peer_matches_hostname_node(const braft::PeerId& peer_id, const std::string& hostname_node);
+
+    /**
+     * Trigger immediate cluster configuration refresh (bypasses the 10s timer)
+     */
+    void trigger_immediate_config_refresh();
+
     int64_t get_num_queued_writes();
 
     bool is_leader();
@@ -333,6 +361,16 @@ private:
 
     void on_error(const ::braft::Error& e) {
         LOG(ERROR) << "Met peering error " << e;
+        
+        // Check if this is a peer connection failure that might benefit from DNS re-resolution
+        if (e.type() == ::braft::ERROR_TYPE_LOG_REPLICATION || 
+            e.type() == ::braft::ERROR_TYPE_INSTALL_SNAPSHOT) {
+            // Extract peer information from error if possible
+            // Note: braft::Error doesn't always provide peer info directly,
+            // but we can still trigger a general refresh check
+            LOG(INFO) << "Peer communication error detected, checking for hostname-based peers";
+            trigger_immediate_config_refresh();
+        }
     }
 
     void on_configuration_committed(const ::braft::Configuration& conf) {
