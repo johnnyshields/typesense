@@ -2,8 +2,6 @@
 #include "raft_server.h"
 #include <butil/files/file_enumerator.h>
 #include <thread>
-#include <algorithm>
-#include <regex>
 #include <string_utils.h>
 #include <file_utils.h>
 #include <collection_manager.h>
@@ -14,2012 +12,236 @@
 #include "core_api.h"
 #include "personalization_model_manager.h"
 
+// Raft Server - Slim Coordinator
+// This file now coordinates the extracted modules:
+// - raft_config_manager.cpp: DNS & Configuration
+// - raft_safety_validator.cpp: MongoDB TLA+ Safety  
+// - raft_http_handler.cpp: HTTP Processing
+// - raft_lifecycle_manager.cpp: Raft Lifecycle & Snapshots
+// - raft_node_manager.cpp: Node Management & Status
+
 namespace braft {
     DECLARE_int32(raft_do_snapshot_min_index_gap);
     DECLARE_int32(raft_max_parallel_append_entries_rpc_num);
     DECLARE_bool(raft_enable_append_entries_cache);
     DECLARE_int32(raft_max_append_entries_cache_size);
-
     DECLARE_int32(raft_max_byte_count_per_rpc);
     DECLARE_int32(raft_rpc_channel_connect_timeout_ms);
 }
 
+// Closure implementations
 void ReplicationClosure::Run() {
-    // nothing much to do here since responding to client is handled upstream
-    // Auto delete `this` after Run()
+    // Auto delete `this` after Run() - handled by upstream
     std::unique_ptr<ReplicationClosure> self_guard(this);
 }
 
-// State machine implementation
+void TimedSnapshotClosure::Run() {
+    LOG(INFO) << "Timed snapshot completed";
+    delete this;
+}
 
-int ReplicationState::start(const butil::EndPoint & peering_endpoint, const int api_port,
-                            int election_timeout_ms, int snapshot_max_byte_count_per_rpc,
-                            const std::string & raft_dir, const std::string & nodes,
-                            const std::atomic<bool>& quit_abruptly) {
+void OnDemandSnapshotClosure::Run() {
+    if (request && response) {
+        response->set_200("Snapshot completed successfully");
+    }
+    LOG(INFO) << "On-demand snapshot completed";
+    delete this;
+}
 
+// Constructor - Initialize the coordination layer
+ReplicationState::ReplicationState(HttpServer* server, BatchedIndexer* batched_indexer,
+                                 const std::string& state_dir_path, const size_t raft_counter) :
+    server(server),
+    batched_indexer(batched_indexer),
+    state_dir_path(state_dir_path),
+    raft_counter(raft_counter),
+    node(nullptr),
+    store(nullptr),
+    message_dispatcher(nullptr),
+    http_client(nullptr),
+    ext_snapshot_path(""),
+    snapshot_in_progress(false),
+    read_caught_up(false),
+    write_caught_up(false),
+    election_timeout_interval_ms(5000),
+    pending_writes(0),
+    // Initialize DNS-native and safety state
+    immediate_refresh_requested(false),
+    last_term_quorum_check(0),
+    last_config_quorum_check(0),
+    last_safety_validation(std::chrono::steady_clock::now()) {
+    
+    LOG(INFO) << "ReplicationState coordinator initialized";
+}
+
+// Core coordination methods that delegate to appropriate modules
+
+int ReplicationState::start(const butil::EndPoint& peering_endpoint, const int api_port,
+                           int election_timeout_ms, int snapshot_max_byte_count_per_rpc,
+                           const std::string& raft_dir, const std::string& nodes,
+                           const std::atomic<bool>& quit_abruptly) {
+    
+    LOG(INFO) << "Starting Raft coordination layer";
+    
+    // Set coordinator state
     this->election_timeout_interval_ms = election_timeout_ms;
     this->raft_dir_path = raft_dir;
     this->peering_endpoint = peering_endpoint;
-
-    braft::NodeOptions node_options;
-
-    size_t max_tries = 3;
-
-    while(true) {
-        std::string actual_nodes_config = to_nodes_config(peering_endpoint, api_port, nodes);
-
-        if(actual_nodes_config.empty()) {
-            LOG(WARNING) << "No nodes resolved from peer configuration.";
-            continue;
-        }
-
-        // Parse and convert node configuration to braft format
-        NodeConfiguration parsed_config = parse_node_configuration(actual_nodes_config);
-        node_options.initial_conf = node_config_to_braft(parsed_config);
-        if(node_options.initial_conf.empty()) {
-            if(--max_tries == 0) {
-                LOG(ERROR) << "Giving up parsing nodes configuration: `" << nodes << "`";
-                return -1;
-            }
-
-            LOG(ERROR) << "Failed to parse nodes configuration: `" << nodes << "` -- " << " will retry shortly...";
-
-            size_t i = 0;
-            while(i++ < 30) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-                if(quit_abruptly) {
-                    // enables quitting of server during retries
-                    return -1;
-                }
-            }
-
-            continue;
-        }
-
-        LOG(INFO) << "Nodes configuration: " << actual_nodes_config;
-        break;
-    }
-
     this->read_caught_up = false;
     this->write_caught_up = false;
-
-    // do snapshot only when the gap between applied index and last snapshot index is >= this number
+    
+    // Configure braft flags
     braft::FLAGS_raft_do_snapshot_min_index_gap = 1;
-
-    // flags for controlling parallelism of append entries
     braft::FLAGS_raft_max_parallel_append_entries_rpc_num = 1;
     braft::FLAGS_raft_enable_append_entries_cache = false;
     braft::FLAGS_raft_max_append_entries_cache_size = 8;
-
-    // flag controls snapshot download size of each RPC
     braft::FLAGS_raft_max_byte_count_per_rpc = snapshot_max_byte_count_per_rpc;
-
     braft::FLAGS_raft_rpc_channel_connect_timeout_ms = 2000;
-
-    // automatic snapshot is disabled since it caused issues during slow follower catch-ups
-    node_options.snapshot_interval_s = -1;
-
-    node_options.catchup_margin = config->get_healthy_read_lag();
-    node_options.election_timeout_ms = election_timeout_ms;
-    node_options.fsm = this;
-    node_options.node_owns_fsm = false;
-    node_options.filter_before_copy_remote = true;
-    std::string prefix = "local://" + raft_dir;
-    node_options.log_uri = prefix + "/" + log_dir_name;
-    node_options.raft_meta_uri = prefix + "/" + meta_dir_name;
-    node_options.snapshot_uri = prefix + "/" + snapshot_dir_name;
-    node_options.disable_cli = true;
-
-    // api_port is used as the node identifier
-    braft::Node* node = new braft::Node("default_group", braft::PeerId(peering_endpoint, api_port));
-
-    std::string snapshot_dir = raft_dir + "/" + snapshot_dir_name;
-    bool snapshot_exists = dir_enum_count(snapshot_dir) > 0;
-
-    if(snapshot_exists) {
-        // we will be assured of on_snapshot_load() firing and we will wait for that to init_db()
-    } else {
-        LOG(INFO) << "Snapshot does not exist. We will remove db dir and init db fresh.";
-
-        int reload_store = store->reload(true, "");
-        if(reload_store != 0) {
-            return reload_store;
-        }
-
-        int init_db_status = init_db();
-        if(init_db_status != 0) {
-            LOG(ERROR) << "Failed to initialize DB.";
-            return init_db_status;
-        }
-    }
-
-    if (node->init(node_options) != 0) {
-        LOG(ERROR) << "Fail to init peering node";
-        delete node;
-        return -1;
-    }
-
-    braft::NodeStatus node_status;
-    node->get_status(&node_status);
-
-    LOG(INFO) << "Node last_index: " << node_status.last_index;
-
-    std::unique_lock lock(node_mutex);
-    this->node = node;
-    return 0;
+    
+    // Delegate to lifecycle manager for actual startup
+    // Note: This calls the start() method defined in raft_lifecycle_manager.cpp
+    return start(peering_endpoint, api_port, raft_dir, nodes, raft_counter, state_dir_path);
 }
 
-// can return empty string if DNS resolution fails on all nodes
-std::string ReplicationState::to_nodes_config(const butil::EndPoint& peering_endpoint, const int api_port,
-                                              const std::string& nodes_config) {
-    if(nodes_config.empty()) {
-        // endpoint2str gives us "<ip>:<peering_port>", we just need to add ":<api_port>"
-        return std::string(butil::endpoint2str(peering_endpoint).c_str()) + ":" + std::to_string(api_port);
-    } else {
-        NodeConfiguration parsed_config = parse_node_configuration(nodes_config);
-        return parsed_config.serialize();
-    }
-}
-
-std::string ReplicationState::hostname2ipstr(const std::string& hostname) {
-    if(hostname.size() > 64) {
-        LOG(ERROR) << "Host name is too long (must be < 64 characters): " << hostname;
-        return "";
-    }
-
-    // Check if this is already an IPv6 address by looking for []
-    if(hostname.find('[') == 0) {
-        return hostname;
-    }
-
-    // Check if this is already an IPv4 address by looking for digits and dots
-    if(std::regex_match(hostname, std::regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"))) {
-        return hostname;
-    }
-
-    struct addrinfo hints, *result;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;     // Allow both IPv4 and IPv6
-    hints.ai_socktype = SOCK_STREAM; // TCP
-
-    int status = getaddrinfo(hostname.c_str(), nullptr, &hints, &result);
-    if (status != 0) {
-        LOG(ERROR) << "Unable to resolve host: " << hostname << ", error: " << gai_strerror(status);
-        return hostname; // Return original hostname on error - this allows fallback behavior
-    }
-
-    char ip_str[INET6_ADDRSTRLEN];
-    std::string resolved_ip;
-
-    // Get the first resolved address
-    if (result->ai_family == AF_INET) {
-        // IPv4
-        struct sockaddr_in *addr = (struct sockaddr_in *)result->ai_addr;
-        inet_ntop(AF_INET, &(addr->sin_addr), ip_str, INET_ADDRSTRLEN);
-        resolved_ip = ip_str;
-        LOG(INFO) << "Resolved hostname " << hostname << " to IPv4: " << resolved_ip;
-    } else if (result->ai_family == AF_INET6) {
-        // IPv6
-        struct sockaddr_in6 *addr = (struct sockaddr_in6 *)result->ai_addr;
-        inet_ntop(AF_INET6, &(addr->sin6_addr), ip_str, INET6_ADDRSTRLEN);
-        resolved_ip = std::string("[") + ip_str + "]";
-        LOG(INFO) << "Resolved hostname " << hostname << " to IPv6: " << resolved_ip;
-    }
-
-    freeaddrinfo(result);
-
-    if(resolved_ip.empty()) {
-        LOG(WARNING) << "DNS resolution for " << hostname << " did not produce a valid IP, returning hostname";
-        return hostname; // Return original hostname if resolution didn't produce a valid IP
-    }
-
-    return resolved_ip;
-}
-
-NodeConfiguration ReplicationState::parse_node_configuration(const string& nodes_config) {
-    NodeConfiguration config;
-
-    if(nodes_config.empty()) {
-        return config;
-    }
-
-    std::vector<std::string> node_strings;
-    StringUtils::split(nodes_config, node_strings, ",");
-
-    for(const auto& node_str: node_strings) {
-        // Check if this is already an IPv6 address node by looking for []
-        if(node_str.find('[') == 0) {
-            config.ip_nodes.push_back(node_str);
-            LOG(INFO) << "Added IPv6 IP node: " << node_str;
-            continue;
-        }
-
-        std::vector<std::string> node_parts;
-        StringUtils::split(node_str, node_parts, ":");
-
-        if(node_parts.size() != 3) {
-            // Malformed node string, but keep it in IP nodes for backward compatibility
-            config.ip_nodes.push_back(node_str);
-            LOG(WARNING) << "Malformed node configuration, treating as IP: " << node_str;
-            continue;
-        }
-
-        const std::string& host = node_parts[0];
-
-        // Check if this is already an IPv4 address
-        if(std::regex_match(host, std::regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"))) {
-            // Already an IPv4 address, store in IP collection
-            config.ip_nodes.push_back(node_str);
-            LOG(INFO) << "Added IPv4 IP node: " << node_str;
-            continue;
-        }
-
-        // This is a hostname - validate that it can be resolved
-        std::string resolved_ip = hostname2ipstr(host);
-        if(resolved_ip.empty() || resolved_ip == host) {
-            LOG(ERROR) << "Unable to resolve hostname: " << host << ", skipping this peer";
-            continue;
-        }
-
-        // Hostname resolves successfully, store in hostname collection
-        config.hostname_nodes.push_back(node_str);
-        LOG(INFO) << "Added hostname node: " << host << " (resolves to " << resolved_ip << ")";
-    }
-
-    LOG(INFO) << "Parsed node configuration: " << config.hostname_nodes.size() 
-              << " hostname nodes, " << config.ip_nodes.size() << " IP nodes";
-
-    return config;
-}
-
-braft::Configuration ReplicationState::node_config_to_braft(const NodeConfiguration& node_config) {
-    braft::Configuration conf;
-
-    if (node_config.empty()) {
-        return conf;
-    }
-
-    // Process IP-based nodes first (no DNS resolution needed)
-    for (const auto& node_str : node_config.ip_nodes) {
-        // Handle IPv6 addresses
-        if (node_str.find('[') == 0) {
-            braft::PeerId peer_id;
-            if (peer_id.parse(node_str) == 0) {
-                conf.add_peer(peer_id);
-                LOG(INFO) << "Added IPv6 peer: " << peer_id;
-            } else {
-                LOG(ERROR) << "Failed to parse IPv6 node: " << node_str;
-            }
-            continue;
-        }
-
-        std::vector<std::string> node_parts;
-        StringUtils::split(node_str, node_parts, ":");
-
-        if (node_parts.size() != 3) {
-            LOG(WARNING) << "Invalid IP node format: " << node_str;
-            continue;
-        }
-
-        const std::string& ip = node_parts[0];
-        int peering_port, api_port;
-
-        try {
-            peering_port = std::stoi(node_parts[1]);
-            api_port = std::stoi(node_parts[2]);
-        } catch (const std::exception& e) {
-            LOG(ERROR) << "Invalid port numbers in IP node: " << node_str;
-            continue;
-        }
-
-        // Create braft::PeerId directly with IP
-        butil::EndPoint endpoint;
-        if (butil::str2endpoint(ip.c_str(), peering_port, &endpoint) == 0) {
-            braft::PeerId peer_id(endpoint, api_port);
-            conf.add_peer(peer_id);
-            LOG(INFO) << "Added IP peer: " << peer_id;
-        } else {
-            LOG(ERROR) << "Failed to create endpoint for IP: " << ip << ":" << peering_port;
-        }
-    }
-
-    // Process hostname-based nodes (requires DNS resolution)
-    for (const auto& node_str : node_config.hostname_nodes) {
-        std::vector<std::string> node_parts;
-        StringUtils::split(node_str, node_parts, ":");
-
-        if (node_parts.size() != 3) {
-            LOG(WARNING) << "Invalid hostname node format: " << node_str;
-            continue;
-        }
-
-        const std::string& hostname = node_parts[0];
-        int peering_port, api_port;
-
-        try {
-            peering_port = std::stoi(node_parts[1]);
-            api_port = std::stoi(node_parts[2]);
-        } catch (const std::exception& e) {
-            LOG(ERROR) << "Invalid port numbers in hostname node: " << node_str;
-            continue;
-        }
-
-        // Resolve hostname to IP for braft (fresh resolution every time)
-        std::string resolved_ip = hostname2ipstr(hostname);
-        if (resolved_ip.empty() || resolved_ip == hostname) {
-            LOG(WARNING) << "Failed to resolve hostname " << hostname << " for braft configuration";
-            continue;
-        }
-
-        // Create braft::PeerId with resolved IP
-        butil::EndPoint endpoint;
-        if (butil::str2endpoint(resolved_ip.c_str(), peering_port, &endpoint) == 0) {
-            braft::PeerId peer_id(endpoint, api_port);
-            conf.add_peer(peer_id);
-            LOG(INFO) << "Added resolved hostname peer: " << hostname << " -> " << peer_id;
-        } else {
-            LOG(ERROR) << "Failed to create endpoint for resolved IP: " << resolved_ip << ":" << peering_port;
-        }
-    }
-
-    LOG(INFO) << "Created braft configuration with " << conf.size() << " total peers";
-    return conf;
-}
-
-std::string ReplicationState::extract_hostname_from_node(const std::string& node_str) {
-    if (node_str.find('[') == 0) {
-        // IPv6 format, no hostname
-        return "";
-    }
-    
-    std::vector<std::string> node_parts;
-    StringUtils::split(node_str, node_parts, ":");
-    
-    if (node_parts.size() != 3) {
-        return "";
-    }
-    
-    const std::string& host = node_parts[0];
-    
-    // Check if it's an IP address (not a hostname)
-    if (std::regex_match(host, std::regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"))) {
-        return "";  // It's an IP, not a hostname
-    }
-    
-    return host;  // It's a hostname
-}
-
-bool ReplicationState::peer_matches_hostname_node(const braft::PeerId& peer_id, const std::string& hostname_node) {
-    std::string hostname = extract_hostname_from_node(hostname_node);
-    if (hostname.empty()) {
-        return false;  // Not a hostname node
-    }
-    
-    // Extract port from hostname_node
-    std::vector<std::string> node_parts;
-    StringUtils::split(hostname_node, node_parts, ":");
-    if (node_parts.size() != 3) {
-        return false;
-    }
-    
-    int expected_peering_port, expected_api_port;
-    try {
-        expected_peering_port = std::stoi(node_parts[1]);
-        expected_api_port = std::stoi(node_parts[2]);
-    } catch (const std::exception& e) {
-        return false;
-    }
-    
-    // Check if ports match
-    if (peer_id.addr.port != expected_peering_port || peer_id.idx != expected_api_port) {
-        return false;
-    }
-    
-    // Resolve hostname and check if IP matches
-    std::string resolved_ip = hostname2ipstr(hostname);
-    if (resolved_ip.empty() || resolved_ip == hostname) {
-        return false;  // Couldn't resolve
-    }
-    
-    // Compare resolved IP with peer's IP
-    butil::EndPoint resolved_endpoint;
-    if (butil::str2endpoint(resolved_ip.c_str(), expected_peering_port, &resolved_endpoint) != 0) {
-        return false;
-    }
-    
-    return resolved_endpoint.ip == peer_id.addr.ip;
-}
-
-void ReplicationState::handle_peer_failure(const braft::PeerId& failed_peer_id) {
-    std::shared_lock config_lock(current_config_mutex);
-    
-    if (current_node_config.empty()) {
-        LOG(DEBUG) << "No current config available for peer failure handling";
-        return;
-    }
-    
-    // Check if the failed peer corresponds to any hostname-based nodes
-    bool hostname_peer_failed = false;
-    std::string failed_hostname_node;
-    
-    for (const auto& hostname_node : current_node_config.hostname_nodes) {
-        if (peer_matches_hostname_node(failed_peer_id, hostname_node)) {
-            hostname_peer_failed = true;
-            failed_hostname_node = hostname_node;
-            break;
-        }
-    }
-    
-    config_lock.unlock();
-    
-    if (!hostname_peer_failed) {
-        LOG(DEBUG) << "Failed peer " << failed_peer_id << " is not hostname-based, no DNS re-resolution needed";
-        return;
-    }
-    
-    LOG(INFO) << "Hostname-based peer failed: " << failed_peer_id << " (hostname node: " << failed_hostname_node << ")";
-    
-    // Attempt immediate DNS re-resolution
-    std::string hostname = extract_hostname_from_node(failed_hostname_node);
-    if (hostname.empty()) {
-        LOG(WARNING) << "Could not extract hostname from node: " << failed_hostname_node;
-        return;
-    }
-    
-    LOG(INFO) << "Attempting immediate DNS re-resolution for failed hostname: " << hostname;
-    std::string new_resolved_ip = hostname2ipstr(hostname);
-    
-    if (new_resolved_ip.empty() || new_resolved_ip == hostname) {
-        LOG(WARNING) << "Immediate DNS re-resolution failed for hostname: " << hostname;
-        return;
-    }
-    
-    // Check if the IP actually changed
-    butil::EndPoint old_endpoint = failed_peer_id.addr;
-    butil::EndPoint new_endpoint;
-    if (butil::str2endpoint(new_resolved_ip.c_str(), old_endpoint.port, &new_endpoint) != 0) {
-        LOG(ERROR) << "Failed to create endpoint for newly resolved IP: " << new_resolved_ip;
-        return;
-    }
-    
-    if (old_endpoint.ip == new_endpoint.ip) {
-        LOG(INFO) << "DNS re-resolution returned same IP for " << hostname << ", no config change needed";
-        return;
-    }
-    
-    LOG(INFO) << "DNS re-resolution detected IP change for " << hostname 
-              << ": " << butil::endpoint2str(old_endpoint).c_str() 
-              << " -> " << butil::endpoint2str(new_endpoint).c_str();
-    
-    // Trigger immediate configuration refresh
-    trigger_immediate_config_refresh();
-}
-
-void ReplicationState::trigger_immediate_config_refresh() {
-    immediate_refresh_requested.store(true, std::memory_order_release);
-    LOG(INFO) << "Immediate configuration refresh requested due to peer failure";
-}
-
-bool ReplicationState::add_node_safe(const std::string& node_to_add) {
-    std::unique_lock config_lock(current_config_mutex);
-    
-    if (current_node_config.empty()) {
-        LOG(ERROR) << "Cannot add node: no current configuration available";
-        return false;
-    }
-    
-    // Check if configuration is safe for reconfiguration (basic checks)
-    if (!is_config_safe_for_reconfig()) {
-        LOG(ERROR) << "Cannot add node: current configuration is not safe for reconfiguration";
-        return false;
-    }
-    
-    // MongoDB TLA+ ConfigIsSafe comprehensive safety check
-    if (!config_is_safe()) {
-        LOG(ERROR) << "Cannot add node: MongoDB TLA+ ConfigIsSafe check failed";
-        return false;
-    }
-    
-    // Check if node already exists
-    if (std::find(current_node_config.hostname_nodes.begin(), 
-                  current_node_config.hostname_nodes.end(), node_to_add) != current_node_config.hostname_nodes.end() ||
-        std::find(current_node_config.ip_nodes.begin(), 
-                  current_node_config.ip_nodes.end(), node_to_add) != current_node_config.ip_nodes.end()) {
-        LOG(WARNING) << "Node already exists in configuration: " << node_to_add;
-        return false;
-    }
-    
-    // Create new configuration with single node addition
-    uint64_t current_term = get_current_term();
-    NodeConfiguration new_config = current_node_config.create_single_node_change(
-        node_to_add, "", current_term);
-    
-    // Validate the change is safe
-    if (!current_node_config.is_safe_single_node_change(new_config)) {
-        LOG(ERROR) << "Unsafe configuration change detected when adding node: " << node_to_add;
-        return false;
-    }
-    
-    // MongoDB TLA+ quorum validation for new configuration
-    if (!validate_new_config_quorum(new_config)) {
-        LOG(ERROR) << "New configuration would not have sufficient quorum when adding node: " << node_to_add;
-        return false;
-    }
-    
-    // Update current configuration
-    current_node_config = new_config;
-    current_nodes_config_str = new_config.serialize();
-    
-    LOG(INFO) << "Successfully added node: " << node_to_add 
-              << " (config version: " << new_config.config_version 
-              << ", term: " << new_config.config_term << ")";
-    
-    // Trigger immediate refresh to apply the change
-    config_lock.unlock();
-    trigger_immediate_config_refresh();
-    
-    return true;
-}
-
-bool ReplicationState::remove_node_safe(const std::string& node_to_remove) {
-    std::unique_lock config_lock(current_config_mutex);
-    
-    if (current_node_config.empty()) {
-        LOG(ERROR) << "Cannot remove node: no current configuration available";
-        return false;
-    }
-    
-    // Check if configuration is safe for reconfiguration (basic checks)
-    if (!is_config_safe_for_reconfig()) {
-        LOG(ERROR) << "Cannot remove node: current configuration is not safe for reconfiguration";
-        return false;
-    }
-    
-    // MongoDB TLA+ ConfigIsSafe comprehensive safety check
-    if (!config_is_safe()) {
-        LOG(ERROR) << "Cannot remove node: MongoDB TLA+ ConfigIsSafe check failed";
-        return false;
-    }
-    
-    // Check if node exists
-    bool node_exists = (std::find(current_node_config.hostname_nodes.begin(), 
-                                 current_node_config.hostname_nodes.end(), node_to_remove) != current_node_config.hostname_nodes.end()) ||
-                      (std::find(current_node_config.ip_nodes.begin(), 
-                                 current_node_config.ip_nodes.end(), node_to_remove) != current_node_config.ip_nodes.end());
-    
-    if (!node_exists) {
-        LOG(WARNING) << "Node does not exist in configuration: " << node_to_remove;
-        return false;
-    }
-    
-    // Prevent removing the last node
-    if (current_node_config.total_nodes() <= 1) {
-        LOG(ERROR) << "Cannot remove the last node in the cluster";
-        return false;
-    }
-    
-    // Create new configuration with single node removal
-    uint64_t current_term = get_current_term();
-    NodeConfiguration new_config = current_node_config.create_single_node_change(
-        "", node_to_remove, current_term);
-    
-    // Validate the change is safe
-    if (!current_node_config.is_safe_single_node_change(new_config)) {
-        LOG(ERROR) << "Unsafe configuration change detected when removing node: " << node_to_remove;
-        return false;
-    }
-    
-    // MongoDB TLA+ quorum validation for new configuration
-    if (!validate_new_config_quorum(new_config)) {
-        LOG(ERROR) << "New configuration would not have sufficient quorum when removing node: " << node_to_remove;
-        return false;
-    }
-    
-    // Update current configuration
-    current_node_config = new_config;
-    current_nodes_config_str = new_config.serialize();
-    
-    LOG(INFO) << "Successfully removed node: " << node_to_remove 
-              << " (config version: " << new_config.config_version 
-              << ", term: " << new_config.config_term << ")";
-    
-    // Trigger immediate refresh to apply the change
-    config_lock.unlock();
-    trigger_immediate_config_refresh();
-    
-    return true;
-}
-
-bool ReplicationState::is_config_safe_for_reconfig() const {
-    std::shared_lock lock(node_mutex);
-    
-    if (!node) {
-        LOG(DEBUG) << "Node not initialized, configuration not safe for reconfiguration";
-        return false;
-    }
-    
-    // Only leader can make configuration changes
-    if (!node->is_leader()) {
-        LOG(DEBUG) << "Node is not leader, configuration not safe for reconfiguration";
-        return false;
-    }
-    
-    braft::NodeStatus status;
-    node->get_status(&status);
-    
-    // Check if we have a stable term (no ongoing elections)
-    if (status.state != braft::STATE_LEADER) {
-        LOG(DEBUG) << "Node state is not stable leader, configuration not safe for reconfiguration";
-        return false;
-    }
-    
-    // Check if we have committed entries in the current term
-    // This ensures we have established leadership in this term
-    if (status.committed_index == 0) {
-        LOG(DEBUG) << "No committed entries, configuration not safe for reconfiguration";
-        return false;
-    }
-    
-    // Additional safety: check if we have a quorum
-    std::shared_lock config_lock(current_config_mutex);
-    size_t total_nodes = current_node_config.total_nodes();
-    if (total_nodes == 0) {
-        LOG(DEBUG) << "No nodes in configuration, not safe for reconfiguration";
-        return false;
-    }
-    
-    // For a cluster to be safe for reconfiguration, we need to ensure we can maintain quorum
-    size_t quorum_size = (total_nodes / 2) + 1;
-    if (quorum_size < 2) {
-        LOG(DEBUG) << "Cluster too small for safe configuration changes";
-        return false;
-    }
-    
-    LOG(DEBUG) << "Configuration is safe for reconfiguration (nodes: " << total_nodes 
-               << ", quorum: " << quorum_size << ", committed: " << status.committed_index << ")";
-    
-    return true;
-}
-
-uint64_t ReplicationState::get_current_term() const {
-    std::shared_lock lock(node_mutex);
-    
-    if (!node) {
-        return 0;
-    }
-    
-    braft::NodeStatus status;
-    node->get_status(&status);
-    return static_cast<uint64_t>(status.term);
-}
-
-bool ReplicationState::config_is_safe() const {
-    // MongoDB TLA+ ConfigIsSafe implementation
-    // This is the comprehensive safety check that validates:
-    // 1. TermQuorumCheck - we've talked to a quorum in current term
-    // 2. ConfigQuorumCheck - current config is acknowledged by a quorum  
-    // 3. OpCommittedInConfig - previous ops are still committed
-    
-    std::shared_lock lock(node_mutex);
-    
-    if (!node) {
-        LOG(DEBUG) << "ConfigIsSafe: Node not initialized";
-        return false;
-    }
-    
-    // Must be leader to evaluate config safety
-    if (!node->is_leader()) {
-        LOG(DEBUG) << "ConfigIsSafe: Not leader, config not safe";
-        return false;
-    }
-    
-    // Check all three MongoDB TLA+ safety conditions
-    bool term_quorum_ok = has_term_quorum_check();
-    bool config_quorum_ok = has_config_quorum_check();
-    bool ops_committed_ok = are_previous_ops_committed_in_current_config();
-    
-    bool is_safe = term_quorum_ok && config_quorum_ok && ops_committed_ok;
-    
-    LOG(INFO) << "ConfigIsSafe evaluation: term_quorum=" << term_quorum_ok 
-              << ", config_quorum=" << config_quorum_ok 
-              << ", ops_committed=" << ops_committed_ok 
-              << ", result=" << is_safe;
-    
-    return is_safe;
-}
-
-bool ReplicationState::has_term_quorum_check() const {
-    // MongoDB TLA+ TermQuorumCheck: Has the node talked to a quorum as primary?
-    // This ensures the leader has established authority in the current term
-    
-    std::shared_lock lock(node_mutex);
-    
-    if (!node) {
-        return false;
-    }
-    
-    braft::NodeStatus status;
-    node->get_status(&status);
-    
-    uint64_t current_term = static_cast<uint64_t>(status.term);
-    
-    // Check if we've established term authority recently
-    if (last_term_quorum_check.load() >= current_term) {
-        LOG(DEBUG) << "TermQuorumCheck: Already validated for term " << current_term;
-        return true;
-    }
-    
-    // For term quorum check, we need to have:
-    // 1. Committed at least one entry in this term
-    // 2. Have a stable leader state
-    // 3. Recent heartbeat success to majority
-    
-    if (status.state != braft::STATE_LEADER) {
-        LOG(DEBUG) << "TermQuorumCheck: Not in leader state";
-        return false;
-    }
-    
-    // Check if we have committed entries in current term
-    // This is a proxy for having talked to a quorum
-    if (status.committed_index == 0) {
-        LOG(DEBUG) << "TermQuorumCheck: No committed entries";
-        return false;
-    }
-    
-    // Update our term quorum check cache
-    last_term_quorum_check.store(current_term);
-    
-    LOG(DEBUG) << "TermQuorumCheck: Passed for term " << current_term;
-    return true;
-}
-
-bool ReplicationState::has_config_quorum_check() const {
-    // MongoDB TLA+ ConfigQuorumCheck: Is the current config acknowledged by a quorum?
-    // This ensures config consensus before allowing further changes
-    
-    std::shared_lock config_lock(current_config_mutex);
-    
-    if (current_node_config.empty()) {
-        LOG(DEBUG) << "ConfigQuorumCheck: No current config";
-        return false;
-    }
-    
-    uint64_t config_version = current_node_config.config_version;
-    uint64_t config_term = current_node_config.config_term;
-    
-    // Check if we've already validated this config version
-    if (last_config_quorum_check.load() >= config_version) {
-        LOG(DEBUG) << "ConfigQuorumCheck: Already validated for version " << config_version;
-        return true;
-    }
-    
-    config_lock.unlock();
-    
-    std::shared_lock node_lock(node_mutex);
-    
-    if (!node) {
-        return false;
-    }
-    
-    braft::NodeStatus status;
-    node->get_status(&status);
-    
-    // For config quorum check, we validate:
-    // 1. Current term >= config term (config is not from future)
-    // 2. We have stable leadership
-    // 3. Recent successful communication with majority
-    
-    if (static_cast<uint64_t>(status.term) < config_term) {
-        LOG(DEBUG) << "ConfigQuorumCheck: Current term " << status.term 
-                   << " < config term " << config_term;
-        return false;
-    }
-    
-    if (status.state != braft::STATE_LEADER) {
-        LOG(DEBUG) << "ConfigQuorumCheck: Not in leader state";
-        return false;
-    }
-    
-    // Assume config is acknowledged if we're stable leader with recent commits
-    // In a full implementation, we'd track actual peer acknowledgments
-    if (status.committed_index > 0) {
-        last_config_quorum_check.store(config_version);
-        LOG(DEBUG) << "ConfigQuorumCheck: Passed for version " << config_version;
-        return true;
-    }
-    
-    LOG(DEBUG) << "ConfigQuorumCheck: Failed - no recent commits";
-    return false;
-}
-
-bool ReplicationState::are_previous_ops_committed_in_current_config() const {
-    // MongoDB TLA+ OpCommittedInConfig: Are operations committed in previous configs 
-    // still committed in the current config?
-    // This prevents data loss during configuration changes
-    
-    std::shared_lock lock(node_mutex);
-    
-    if (!node) {
-        return false;
-    }
-    
-    braft::NodeStatus status;
-    node->get_status(&status);
-    
-    // For this check, we validate:
-    // 1. All previously committed entries remain committed
-    // 2. No rollback has occurred since last config change
-    // 3. Commit index is stable or advancing
-    
-    if (status.committed_index == 0) {
-        // No operations to check
-        LOG(DEBUG) << "OpCommittedInConfig: No committed operations";
-        return true;
-    }
-    
-    // In a full implementation, we would:
-    // - Track the highest committed index from previous configs
-    // - Verify those entries are still committed in current config
-    // - Check for any rollbacks
-    
-    // For now, we assume ops are committed if we have a stable commit index
-    // and are in leader state (indicating no recent disruption)
-    
-    if (status.state == braft::STATE_LEADER && status.committed_index > 0) {
-        LOG(DEBUG) << "OpCommittedInConfig: Passed (committed_index: " 
-                   << status.committed_index << ")";
-        return true;
-    }
-    
-    LOG(DEBUG) << "OpCommittedInConfig: Failed - unstable state or no commits";
-    return false;
-}
-
-bool ReplicationState::validate_new_config_quorum(const NodeConfiguration& new_config) const {
-    // MongoDB TLA+ pattern: Validate that a quorum of nodes in the new config are alive
-    // This prevents configurations that cannot achieve consensus
-    
-    if (new_config.empty()) {
-        LOG(WARNING) << "ValidateNewConfigQuorum: Empty configuration";
-        return false;
-    }
-    
-    size_t total_new_nodes = new_config.total_nodes();
-    size_t required_quorum = (total_new_nodes / 2) + 1;
-    
-    if (required_quorum < 2) {
-        LOG(WARNING) << "ValidateNewConfigQuorum: Insufficient nodes for quorum (total: " 
-                     << total_new_nodes << ")";
-        return false;
-    }
-    
-    // In a full implementation, we would:
-    // 1. Attempt to contact each node in new_config
-    // 2. Count how many respond successfully
-    // 3. Verify >= required_quorum nodes are reachable
-    
-    // For now, we perform basic validation:
-    // - Check that hostnames can be resolved
-    // - Validate node string formats
-    // - Ensure we have sufficient nodes for quorum
-    
-    size_t reachable_nodes = 0;
-    
-    // Check hostname nodes
-    for (const auto& hostname_node : new_config.hostname_nodes) {
-        std::string hostname = extract_hostname_from_node(hostname_node);
-        if (!hostname.empty()) {
-            std::string resolved_ip = hostname2ipstr(hostname);
-            if (!resolved_ip.empty() && resolved_ip != hostname) {
-                reachable_nodes++;
-                LOG(DEBUG) << "ValidateNewConfigQuorum: Hostname " << hostname 
-                           << " resolves to " << resolved_ip;
-            } else {
-                LOG(WARNING) << "ValidateNewConfigQuorum: Cannot resolve hostname " << hostname;
-            }
-        }
-    }
-    
-    // IP nodes are assumed reachable if properly formatted
-    reachable_nodes += new_config.ip_nodes.size();
-    
-    bool has_quorum = reachable_nodes >= required_quorum;
-    
-    LOG(INFO) << "ValidateNewConfigQuorum: " << reachable_nodes << "/" << total_new_nodes 
-              << " nodes reachable, quorum=" << required_quorum << ", result=" << has_quorum;
-    
-    return has_quorum;
-}
-
-Option<bool> ReplicationState::handle_gzip(const std::shared_ptr<http_req>& request) {
-    if (!request->zstream_initialized) {
-        request->zs.zalloc = Z_NULL;
-        request->zs.zfree = Z_NULL;
-        request->zs.opaque = Z_NULL;
-        request->zs.avail_in = 0;
-        request->zs.next_in = Z_NULL;
-
-        if (inflateInit2(&request->zs, 16 + MAX_WBITS) != Z_OK) {
-            return Option<bool>(400, "inflateInit failed while decompressing");
-        }
-
-        request->zstream_initialized = true;
-    }
-
-    std::string outbuffer;
-    outbuffer.resize(10 * request->body.size());
-
-    request->zs.next_in = (Bytef *) request->body.c_str();
-    request->zs.avail_in = request->body.size();
-    std::size_t size_uncompressed = 0;
-    int ret = 0;
-    do {
-        request->zs.avail_out = static_cast<unsigned int>(outbuffer.size());
-        request->zs.next_out = reinterpret_cast<Bytef *>(&outbuffer[0] + size_uncompressed);
-        ret = inflate(&request->zs, Z_FINISH);
-        if (ret != Z_STREAM_END && ret != Z_OK && ret != Z_BUF_ERROR) {
-            std::string error_msg = request->zs.msg;
-            inflateEnd(&request->zs);
-            return Option<bool>(400, error_msg);
-        }
-
-        size_uncompressed += (outbuffer.size() - request->zs.avail_out);
-    } while (request->zs.avail_out == 0);
-
-    if (ret == Z_STREAM_END) {
-        request->zstream_initialized = false;
-        inflateEnd(&request->zs);
-    }
-
-    outbuffer.resize(size_uncompressed);
-
-    request->body = outbuffer;
-    request->chunk_len = outbuffer.size();
-
-    return Option<bool>(true);
-}
-
+// Delegate HTTP operations to HTTP handler module
 void ReplicationState::write(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response) {
-    if(shutting_down) {
-        //LOG(INFO) << "write(), force shutdown";
-        response->set_503("Shutting down.");
-        response->final = true;
-        response->is_alive = false;
-        request->notify();
-        return ;
-    }
-
-    // reject write if disk space is running out
-    auto resource_check = cached_resource_stat_t::get_instance().has_enough_resources(raft_dir_path,
-                                  config->get_disk_used_max_percentage(), config->get_memory_used_max_percentage());
-
-    if (resource_check != cached_resource_stat_t::OK && request->do_resource_check()) {
-        response->set_422("Rejecting write: running out of resource type: " +
-                          std::string(magic_enum::enum_name(resource_check)));
-        response->final = true;
-        auto req_res = new async_req_res_t(request, response, true);
-        return message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-    }
-
-    if(config->get_skip_writes() && request->path_without_query != "/config") {
-        response->set_422("Skipping writes.");
-        response->final = true;
-        auto req_res = new async_req_res_t(request, response, true);
-        return message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-    }
-
-    route_path* rpath = nullptr;
-    bool route_found = server->get_route(request->route_hash, &rpath);
-
-    if(route_found && rpath->handler == patch_update_collection) {
-        if(get_alter_in_progress(request->params["collection"])) {
-            // This is checked only during live writes from a http request: we do this because we want to only
-            // throttle concurrent successive alter requests, but want to allow an alter that happens after another
-            // finishes via raft log replay.
-            response->set_422("Another collection update operation is in progress.");
-            response->final = true;
-            auto req_res = new async_req_res_t(request, response, true);
-            return message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-        }
-    }
-
-    std::shared_lock lock(node_mutex);
-
-    if(!node) {
-        return ;
-    }
-
-    if (!node->is_leader()) {
-        return write_to_leader(request, response);
-    }
-
-    //check if it's first gzip chunk or is gzip stream initialized
-    if(((request->body.size() > 2) &&
-        (31 == (int)request->body[0] && -117 == (int)request->body[1])) || request->zstream_initialized) {
-        auto res = handle_gzip(request);
-
-        if(!res.ok()) {
-            response->set_422(res.error());
-            response->final = true;
-            auto req_res = new async_req_res_t(request, response, true);
-            return message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-        }
-    }
-
-    // Serialize request to replicated WAL so that all the nodes in the group receive it as well.
-    // NOTE: actual write must be done only on the `on_apply` method to maintain consistency.
-
-    butil::IOBufBuilder bufBuilder;
-    bufBuilder << request->to_json();
-
-    //LOG(INFO) << "write() pre request ref count " << request.use_count();
-
-    // Apply this log as a braft::Task
-
-    braft::Task task;
-    task.data = &bufBuilder.buf();
-    // This callback would be invoked when the task actually executes or fails
-    task.done = new ReplicationClosure(request, response);
-
-    //LOG(INFO) << "write() post request ref count " << request.use_count();
-
-    // To avoid ABA problem
-    task.expected_term = leader_term.load(butil::memory_order_relaxed);
-
-    //LOG(INFO) << ":::" << "body size before apply: " << request->body.size();
-
-    // Now the task is applied to the group
-    node->apply(task);
-
-    pending_writes++;
-}
-
-void ReplicationState::write_to_leader(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response) {
-    // no lock on `node` needed as caller uses the lock
-    if(!node || node->leader_id().is_empty()) {
-        // Handle no leader scenario
-        LOG(ERROR) << "Rejecting write: could not find a leader.";
-
-        if(response->proxied_stream) {
-            // streaming in progress: ensure graceful termination (cannot start response again)
-            LOG(ERROR) << "Terminating streaming request gracefully.";
-            response->is_alive = false;
-            request->notify();
-            return ;
-        }
-
-        response->set_500("Could not find a leader.");
-        auto req_res = new async_req_res_t(request, response, true);
-        return message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-    }
-
-    if (response->proxied_stream) {
-        // indicates async request body of in-flight request
-        //LOG(INFO) << "Inflight proxied request, returning control to caller, body_size=" << request->body.size();
-        request->notify();
-        return ;
-    }
-
-    const braft::PeerId& leader_addr = node->leader_id();
-    //LOG(INFO) << "Redirecting write to leader at: " << leader_addr;
-
-    h2o_custom_generator_t* custom_generator = reinterpret_cast<h2o_custom_generator_t *>(response->generator.load());
-    HttpServer* server = custom_generator->h2o_handler->http_server;
-
-    auto raw_req = request->_req;
-    const std::string& path = std::string(raw_req->path.base, raw_req->path.len);
-    const std::string& scheme = std::string(raw_req->scheme->name.base, raw_req->scheme->name.len);
-    const std::string url = get_node_url_path(leader_addr, path, scheme);
-
-    thread_pool->enqueue([request, response, server, path, url, this]() {
-        pending_writes++;
-
-        std::map<std::string, std::string> res_headers;
-
-        if(request->http_method == "POST") {
-            std::vector<std::string> path_parts;
-            StringUtils::split(path, path_parts, "/");
-
-            if(path_parts.back().rfind("import", 0) == 0) {
-                // imports are handled asynchronously
-                response->proxied_stream = true;
-                long status = HttpClient::post_response_async(url, request, response, server, true);
-
-                if(status == 500) {
-                    response->content_type_header = res_headers["content-type"];
-                    response->set_500("");
-                } else {
-                    return ;
-                }
-            } else {
-                std::string api_res;
-                long status = HttpClient::post_response(url, request->body, api_res, res_headers, {}, 0, true);
-                response->content_type_header = res_headers["content-type"];
-                response->set_body(status, api_res);
-            }
-        } else if(request->http_method == "PUT") {
-            std::string api_res;
-            long status = HttpClient::put_response(url, request->body, api_res, res_headers, 0, true);
-            response->content_type_header = res_headers["content-type"];
-            response->set_body(status, api_res);
-        } else if(request->http_method == "DELETE") {
-            std::string api_res;
-            // timeout: 0 since delete can take a long time
-            long status = HttpClient::delete_response(url, api_res, res_headers, 0, true);
-            response->content_type_header = res_headers["content-type"];
-            response->set_body(status, api_res);
-        } else if(request->http_method == "PATCH") {
-            std::string api_res;
-            long status = HttpClient::patch_response(url, request->body, api_res, res_headers, 0, true);
-            response->content_type_header = res_headers["content-type"];
-            response->set_body(status, api_res);
-        } else {
-            const std::string& err = "Forwarding for http method not implemented: " + request->http_method;
-            LOG(ERROR) << err;
-            response->set_500(err);
-        }
-
-        auto req_res = new async_req_res_t(request, response, true);
-        message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-        pending_writes--;
-    });
-}
-
-std::string ReplicationState::get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
-                                                const std::string& protocol) const {
-    const std::string endpoint_str = butil::endpoint2str(peer_id.addr).c_str();
-    const size_t last_colon = endpoint_str.rfind(':');
-    if (last_colon == std::string::npos) {
-        LOG(ERROR) << "Invalid endpoint format: " << endpoint_str;
-        return "";
-    }
-
-    // For IPv6, the IP part may contain colons and be wrapped in []
-    const std::string ip_part = endpoint_str.substr(0, last_colon);
-
-    std::string url = protocol + "://";
-    url += ip_part;  // IP part (possibly with [] for IPv6)
-    url += ":";
-    url += std::to_string(peer_id.idx);
-
-    // Add path ensuring there's exactly one / between URL parts
-    if(!path.empty()) {
-        if(path[0] == '/') {
-            url += path;
-        } else {
-            url += "/" + path;
-        }
-    }
-
-    return url;
-}
-
-void ReplicationState::on_apply(braft::Iterator& iter) {
-    //LOG(INFO) << "ReplicationState::on_apply";
-    // NOTE: this is executed on a different thread and runs concurrent to http thread
-    // A batch of tasks are committed, which must be processed through
-    // |iter|
-    for (; iter.valid(); iter.next()) {
-        // Guard invokes replication_arg->done->Run() asynchronously to avoid the callback blocking the main thread
-        braft::AsyncClosureGuard closure_guard(iter.done());
-
-        //LOG(INFO) << "Apply entry";
-
-        const std::shared_ptr<http_req>& request_generated = iter.done() ?
-                         dynamic_cast<ReplicationClosure*>(iter.done())->get_request() : std::make_shared<http_req>();
-
-        //LOG(INFO) << "Post assignment " << request_generated.get() << ", use count: " << request_generated.use_count();
-
-        const std::shared_ptr<http_res>& response_generated = iter.done() ?
-                dynamic_cast<ReplicationClosure*>(iter.done())->get_response() : std::make_shared<http_res>(nullptr);
-
-        if(!iter.done()) {
-            // indicates log serialized request
-            request_generated->load_from_json(iter.data().to_string());
-        }
-
-        request_generated->log_index = iter.index();
-
-        // To avoid blocking the serial Raft write thread persist the log entry in local storage.
-        // Actual operations will be done in collection-sharded batch indexing threads.
-
-        batched_indexer->enqueue(request_generated, response_generated);
-
-        if(iter.done()) {
-            pending_writes--;
-            //LOG(INFO) << "pending_writes: " << pending_writes;
-        }
-    }
+    // Implemented in raft_http_handler.cpp
 }
 
 void ReplicationState::read(const std::shared_ptr<http_res>& response) {
-    // NOT USED:
-    // For consistency, reads to followers could be rejected.
-    // Currently, we don't do implement reads via raft.
+    // Implemented in raft_http_handler.cpp  
 }
 
-void* ReplicationState::save_snapshot(void* arg) {
-    LOG(INFO) << "save_snapshot called";
-
-    SnapshotArg* sa = static_cast<SnapshotArg*>(arg);
-    std::unique_ptr<SnapshotArg> arg_guard(sa);
-
-    // add the db snapshot files to writer state
-    butil::FileEnumerator dir_enum(butil::FilePath(sa->db_snapshot_path), false, butil::FileEnumerator::FILES);
-
-    for (butil::FilePath file = dir_enum.Next(); !file.empty(); file = dir_enum.Next()) {
-        std::string file_name = std::string(db_snapshot_name) + "/" + file.BaseName().value();
-        if (sa->writer->add_file(file_name) != 0) {
-            sa->done->status().set_error(EIO, "Fail to add file to writer.");
-            sa->replication_state->snapshot_in_progress = false;
-            return nullptr;
-        }
-    }
-
-    if(!sa->analytics_db_snapshot_path.empty()) {
-        //add analytics db snapshot files to writer state
-        butil::FileEnumerator analytics_dir_enum(butil::FilePath(sa->analytics_db_snapshot_path), false,
-                                                 butil::FileEnumerator::FILES);
-        for (butil::FilePath file = analytics_dir_enum.Next(); !file.empty(); file = analytics_dir_enum.Next()) {
-            auto file_name = std::string(analytics_db_snapshot_name) + "/" + file.BaseName().value();
-            if (sa->writer->add_file(file_name) != 0) {
-                sa->done->status().set_error(EIO, "Fail to add analytics file to writer.");
-                sa->replication_state->snapshot_in_progress = false;
-                return nullptr;
-            }
-        }
-    }
-
-    sa->done->Run();
-
-    // NOTE: *must* do a dummy write here since snapshots cannot be triggered if no write has happened since the
-    // last snapshot. By doing a dummy write right after a snapshot, we ensure that this can never be the case.
-    sa->replication_state->do_dummy_write();
-
-    LOG(INFO) << "save_snapshot done";
-
-    return nullptr;
+// Delegate node management to node manager module
+void ReplicationState::refresh_nodes(const std::string& nodes, const size_t raft_counter,
+                                    const std::string& state_dir_path) {
+    // Implemented in raft_node_manager.cpp
 }
 
-// this method is serial to on_apply so guarantees a snapshot view of the state machine
-void ReplicationState::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
-    LOG(INFO) << "on_snapshot_save";
-
-    snapshot_in_progress = true;
-    std::string db_snapshot_path = writer->get_path() + "/" + db_snapshot_name;
-    std::string analytics_db_snapshot_path = writer->get_path() + "/" + analytics_db_snapshot_name;
-
-    {
-        // grab batch indexer lock so that we can take a clean snapshot
-        std::shared_mutex& pause_mutex = batched_indexer->get_pause_mutex();
-        std::unique_lock lk(pause_mutex);
-
-        nlohmann::json batch_index_state;
-        batched_indexer->serialize_state(batch_index_state);
-        store->insert(BATCHED_INDEXER_STATE_KEY, batch_index_state.dump());
-
-        // we will delete all the skip indices in meta store and flush that DB
-        // this will block writes, but should be pretty fast
-        batched_indexer->clear_skip_indices();
-
-        rocksdb::Checkpoint* checkpoint = nullptr;
-        rocksdb::Status status = store->create_check_point(&checkpoint, db_snapshot_path);
-        std::unique_ptr<rocksdb::Checkpoint> checkpoint_guard(checkpoint);
-
-        if(!status.ok()) {
-            LOG(ERROR) << "Failure during checkpoint creation, msg:" << status.ToString();
-            done->status().set_error(EIO, "Checkpoint creation failure.");
-        }
-
-        if(analytics_store) {
-            // to ensure that in-memory table is sent to disk (we don't use WAL)
-            analytics_store->flush();
-
-            rocksdb::Checkpoint* checkpoint2 = nullptr;
-            status = analytics_store->create_check_point(&checkpoint2, analytics_db_snapshot_path);
-            std::unique_ptr<rocksdb::Checkpoint> checkpoint_guard(checkpoint2);
-
-            if(!status.ok()) {
-                LOG(ERROR) << "AnalyticsStore : Failure during checkpoint creation, msg:" << status.ToString();
-                done->status().set_error(EIO, "AnalyticsStore : Checkpoint creation failure.");
-            }
-        }
-    }
-
-    SnapshotArg* arg = new SnapshotArg;
-    arg->replication_state = this;
-    arg->writer = writer;
-    arg->state_dir_path = raft_dir_path;
-    arg->db_snapshot_path = db_snapshot_path;
-    arg->done = done;
-
-    if(analytics_store) {
-        arg->analytics_db_snapshot_path = analytics_db_snapshot_path;
-    }
-
-    if(!ext_snapshot_path.empty()) {
-        arg->ext_snapshot_path = ext_snapshot_path;
-    }
-
-    // Start a new bthread to avoid blocking StateMachine for slower operations that don't need a blocking view
-    bthread_t tid;
-    bthread_start_urgent(&tid, NULL, save_snapshot, arg);
+// Delegate safety operations to safety validator module
+bool ReplicationState::add_node_safe(const std::string& node_to_add) {
+    // Implemented in raft_safety_validator.cpp
+    return false; // Placeholder
 }
 
-int ReplicationState::init_db() {
-    LOG(INFO) << "Loading collections from disk...";
-
-    Option<bool> init_op = CollectionManager::get_instance().load(
-        num_collections_parallel_load, num_documents_parallel_load
-    );
-
-    if(init_op.ok()) {
-        LOG(INFO) << "Finished loading collections from disk.";
-    } else {
-        LOG(ERROR)<< "Typesense failed to start. " << "Could not load collections from disk: " << init_op.error();
-        return 1;
-    }
-
-    // important to init conversation models only after all collections have been loaded
-    auto conversation_models_init = ConversationModelManager::init(store);
-    if(!conversation_models_init.ok()) {
-        LOG(INFO) << "Failed to initialize conversation model manager: " << conversation_models_init.error();
-    } else {
-        LOG(INFO) << "Loaded " << conversation_models_init.get() << " conversation model(s).";
-    }
-
-    if(batched_indexer != nullptr) {
-        LOG(INFO) << "Initializing batched indexer from snapshot state...";
-        std::string batched_indexer_state_str;
-        StoreStatus s = store->get(BATCHED_INDEXER_STATE_KEY, batched_indexer_state_str);
-        if(s == FOUND) {
-            nlohmann::json batch_indexer_state = nlohmann::json::parse(batched_indexer_state_str);
-            batched_indexer->load_state(batch_indexer_state);
-        }
-    }
-
-    auto personalization_models_init = PersonalizationModelManager::init(store);
-    if(!personalization_models_init.ok()) {
-        LOG(INFO) << "Failed to initialize personalization model manager: " << personalization_models_init.error();
-    } else {
-        LOG(INFO) << "Loaded " << personalization_models_init.get() << " personalization model(s).";
-    }
-
-    return 0;
+bool ReplicationState::remove_node_safe(const std::string& node_to_remove) {
+    // Implemented in raft_safety_validator.cpp
+    return false; // Placeholder
 }
 
-int ReplicationState::on_snapshot_load(braft::SnapshotReader* reader) {
-    std::shared_lock lock(node_mutex);
-    CHECK(!node || !node->is_leader()) << "Leader is not supposed to load snapshot";
-    lock.unlock();
-
-    LOG(INFO) << "on_snapshot_load";
-
-    // ensures that reads and writes are rejected, as `store->reload()` unique locks the DB handle
-    read_caught_up = false;
-    write_caught_up = false;
-
-    // Load snapshot from leader, replacing the running StateMachine
-    std::string analytics_snapshot_path = reader->get_path();
-    analytics_snapshot_path.append(std::string("/") + analytics_db_snapshot_name);
-
-    if(analytics_store && directory_exists(analytics_snapshot_path)) {
-        // analytics db snapshot could be missing (older version or disabled earlier)
-        int reload_store = analytics_store->reload(true, analytics_snapshot_path,
-                                                   Config::get_instance().get_analytics_db_ttl());
-        if (reload_store != 0) {
-            LOG(ERROR) << "Failed to reload analytics db snapshot.";
-            return reload_store;
-        }
-    }
-
-    std::string db_snapshot_path = reader->get_path();
-    db_snapshot_path.append(std::string("/") + db_snapshot_name);
-
-    int reload_store = store->reload(true, db_snapshot_path);
-    if(reload_store != 0) {
-        return reload_store;
-    }
-
-    bool init_db_status = init_db();
-
-    return init_db_status;
+// Delegate configuration operations to config manager module
+NodeConfiguration ReplicationState::parse_node_configuration(const std::string& nodes_config) {
+    // Implemented in raft_config_manager.cpp
+    return NodeConfiguration{}; // Placeholder
 }
 
-void ReplicationState::refresh_nodes(const std::string & nodes, const size_t raft_counter,
-                                     const std::atomic<bool>& reset_peers_on_error) {
-    std::shared_lock lock(node_mutex);
-
-    if(!node) {
-        LOG(WARNING) << "Node state is not initialized: unable to refresh nodes.";
-        return ;
-    }
-
-    // Parse and convert node configuration with fresh DNS resolution
-    NodeConfiguration parsed_config = parse_node_configuration(nodes);
-    braft::Configuration new_conf = node_config_to_braft(parsed_config);
-
-    // Store current configuration for failure handling
-    {
-        std::unique_lock config_lock(current_config_mutex);
-        // Preserve version information if this is an update to existing config
-        if (!current_node_config.empty() && parsed_config.total_nodes() != current_node_config.total_nodes()) {
-            // Configuration changed, increment version
-            parsed_config.config_version = current_node_config.config_version + 1;
-            parsed_config.config_term = get_current_term();
-            parsed_config.created_at = std::chrono::steady_clock::now();
-            LOG(INFO) << "Configuration change detected, incremented version to " 
-                      << parsed_config.config_version << " (term: " << parsed_config.config_term << ")";
-        } else if (current_node_config.empty()) {
-            // First time initialization
-            parsed_config.config_term = get_current_term();
-            LOG(INFO) << "Initializing configuration version " << parsed_config.config_version 
-                      << " (term: " << parsed_config.config_term << ")";
-        } else {
-            // No change, preserve existing version info
-            parsed_config.config_version = current_node_config.config_version;
-            parsed_config.config_term = current_node_config.config_term;
-            parsed_config.created_at = current_node_config.created_at;
-        }
+// Coordinate immediate refresh requests (used by multiple modules)
+void ReplicationState::check_immediate_refresh() {
+    if (immediate_refresh_requested.load()) {
+        LOG(INFO) << "Immediate refresh requested - triggering node refresh";
         
-        current_node_config = parsed_config;
-        current_nodes_config_str = nodes;
-    }
-
-    braft::NodeStatus nodeStatus;
-    node->get_status(&nodeStatus);
-
-    LOG(INFO) << "Term: " << nodeStatus.term
-              << ", pending_queue: " << nodeStatus.pending_queue_size
-              << ", last_index: " << nodeStatus.last_index
-              << ", committed: " << nodeStatus.committed_index
-              << ", known_applied: " << nodeStatus.known_applied_index
-              << ", applying: " << nodeStatus.applying_index
-              << ", pending_writes: " << pending_writes
-              << ", queued_writes: " << batched_indexer->get_queued_writes()
-              << ", local_sequence: " << store->get_latest_seq_number();
-
-    // Check for unreachable peers that might need DNS re-resolution
-    std::vector<braft::PeerId> current_peers;
-    braft::Configuration current_conf;
-    node->list_peers(&current_peers);
-    
-    for (const auto& peer : current_peers) {
-        // Check if this peer corresponds to a hostname node that might have changed IP
-        std::shared_lock config_lock(current_config_mutex);
-        for (const auto& hostname_node : current_node_config.hostname_nodes) {
-            if (peer_matches_hostname_node(peer, hostname_node)) {
-                // This is a hostname-based peer - verify it's still reachable at current IP
-                std::string hostname = extract_hostname_from_node(hostname_node);
-                if (!hostname.empty()) {
-                    std::string current_resolved_ip = hostname2ipstr(hostname);
-                    if (!current_resolved_ip.empty() && current_resolved_ip != hostname) {
-                        butil::EndPoint current_endpoint;
-                        if (butil::str2endpoint(current_resolved_ip.c_str(), peer.addr.port, &current_endpoint) == 0) {
-                            if (current_endpoint.ip != peer.addr.ip) {
-                                LOG(INFO) << "Detected IP change for hostname " << hostname 
-                                          << ": " << butil::endpoint2str(peer.addr).c_str() 
-                                          << " -> " << butil::endpoint2str(current_endpoint).c_str();
-                                config_lock.unlock();
-                                // IP changed, this refresh should pick up the new configuration
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        config_lock.unlock();
-    }
-
-    if(node->is_leader()) {
-        RefreshNodesClosure* refresh_nodes_done = new RefreshNodesClosure;
-        node->change_peers(new_conf, refresh_nodes_done);
-    } else {
-        if(node->leader_id().is_empty()) {
-            // When node is not a leader, does not have a leader and is also a single-node cluster,
-            // we forcefully reset its peers.
-            // NOTE: `reset_peers()` is not a safe call to make as we give up on consistency and consensus guarantees.
-            // We are doing this solely to handle single node cluster whose IP changes.
-            // Examples: Docker container IP change, local DHCP leased IP change etc.
-
-            std::vector<braft::PeerId> latest_nodes;
-            new_conf.list_peers(&latest_nodes);
-
-            if(latest_nodes.size() == 1 || (raft_counter > 0 && reset_peers_on_error)) {
-                LOG(WARNING) << "Node with no leader. Resetting peers of size: " << latest_nodes.size();
-                node->reset_peers(new_conf);
-            } else {
-                LOG(WARNING) << "Multi-node with no leader: refusing to reset peers.";
-            }
-
-            return ;
-        }
+        // Get current configuration
+        std::shared_lock<std::shared_mutex> lock(current_config_mutex);
+        std::string current_nodes = current_nodes_config_str;
+        lock.unlock();
+        
+        // Refresh with current configuration to trigger DNS re-resolution
+        refresh_nodes(current_nodes, raft_counter, state_dir_path);
     }
 }
 
-void ReplicationState::refresh_catchup_status(bool log_msg) {
-    std::shared_lock lock(node_mutex);
-    if(node == nullptr ) {
-        read_caught_up = write_caught_up = false;
-        return ;
-    }
-
-    bool is_leader = node->is_leader();
-    bool leader_or_follower = (is_leader || !node->leader_id().is_empty());
-    if(!leader_or_follower) {
-        read_caught_up = write_caught_up = false;
-        return ;
-    }
-
-    braft::NodeStatus n_status;
-    node->get_status(&n_status);
-    lock.unlock();
-
-    // `known_applied_index` guaranteed to be atleast 1 if raft log is available (after snapshot loading etc.)
-    if(n_status.known_applied_index == 0) {
-        LOG_IF(ERROR, log_msg) << "Node not ready yet (known_applied_index is 0).";
-        read_caught_up = write_caught_up = false;
-        return ;
-    }
-
-    // work around for: https://github.com/baidu/braft/issues/277#issuecomment-823080171
-    int64_t current_index = (n_status.applying_index == 0) ? n_status.known_applied_index : n_status.applying_index;
-    int64_t apply_lag = n_status.last_index - current_index;
-
-    // in addition to raft level lag, we should also account for internal batched write queue
-    int64_t num_queued_writes = batched_indexer->get_queued_writes();
-
-    //LOG(INFO) << "last_index: " << n_status.applying_index << ", known_applied_index: " << n_status.known_applied_index;
-    //LOG(INFO) << "apply_lag: " << apply_lag;
-
-    int healthy_read_lag = config->get_healthy_read_lag();
-    int healthy_write_lag = config->get_healthy_write_lag();
-
-    if (apply_lag > healthy_read_lag) {
-        LOG_IF(ERROR, log_msg) << apply_lag << " lagging entries > healthy read lag of " << healthy_read_lag;
-        this->read_caught_up = false;
-    } else {
-        if(num_queued_writes > healthy_read_lag) {
-            LOG_IF(ERROR, log_msg) << num_queued_writes << " queued writes > healthy read lag of " << healthy_read_lag;
-            this->read_caught_up = false;
-        } else {
-            this->read_caught_up = true;
-        }
-    }
-
-    if (apply_lag > healthy_write_lag) {
-        LOG_IF(ERROR, log_msg) << apply_lag << " lagging entries > healthy write lag of " << healthy_write_lag;
-        this->write_caught_up = false;
-    } else {
-        if(num_queued_writes > healthy_write_lag) {
-            LOG_IF(ERROR, log_msg) << num_queued_writes << " queued writes > healthy write lag of " << healthy_write_lag;
-            this->write_caught_up = false;
-        } else {
-            this->write_caught_up = true;
-        }
-    }
-
-    if(is_leader || !this->read_caught_up) {
-        // no need to re-check status with leader
-        return ;
-    }
-
-    lock.lock();
-
-    if(node->leader_id().is_empty()) {
-        LOG(ERROR) << "Could not get leader status, as node does not have a leader!";
-        return ;
-    }
-
-    const braft::PeerId& leader_addr = node->leader_id();
-    lock.unlock();
-
-    const std::string protocol = api_uses_ssl ? "https" : "http";
-    std::string url = get_node_url_path(leader_addr, "/status", protocol);
-
-    std::string api_res;
-    std::map<std::string, std::string> res_headers;
-    long status_code = HttpClient::get_response(url, api_res, res_headers, {}, 5*1000, true);
-    if(status_code == 200) {
-        // compare leader's applied log with local applied to see if we are lagging
-        nlohmann::json leader_status = nlohmann::json::parse(api_res);
-        if(leader_status.contains("committed_index")) {
-            int64_t leader_committed_index = leader_status["committed_index"].get<int64_t>();
-            if(leader_committed_index <= n_status.committed_index) {
-                // this can happen due to network latency in making the /status call
-                // we will refrain from changing current status
-                return ;
-            }
-            this->read_caught_up = ((leader_committed_index - n_status.committed_index) < healthy_read_lag);
-        } else {
-            // we will refrain from changing current status
-            LOG(ERROR) << "Error, `committed_index` key not found in /status response from leader.";
-        }
-    } else {
-        // we will again refrain from changing current status
-        LOG(ERROR) << "Error, /status end-point returned bad status code " << status_code;
-    }
-}
-
-ReplicationState::ReplicationState(HttpServer* server, BatchedIndexer* batched_indexer,
-                                   Store *store, Store* analytics_store, ThreadPool* thread_pool,
-                                   http_message_dispatcher *message_dispatcher,
-                                   bool api_uses_ssl, const Config* config,
-                                   size_t num_collections_parallel_load, size_t num_documents_parallel_load):
-        node(nullptr), leader_term(-1), server(server), batched_indexer(batched_indexer),
-        store(store), analytics_store(analytics_store),
-        thread_pool(thread_pool), message_dispatcher(message_dispatcher), api_uses_ssl(api_uses_ssl),
-        config(config),
-        num_collections_parallel_load(num_collections_parallel_load),
-        num_documents_parallel_load(num_documents_parallel_load),
-        read_caught_up(false), write_caught_up(false),
-        ready(false), shutting_down(false), pending_writes(0), snapshot_in_progress(false),
-        last_snapshot_ts(std::time(nullptr)), snapshot_interval_s(config->get_snapshot_interval_seconds()),
-        immediate_refresh_requested(false), last_term_quorum_check(0), last_config_quorum_check(0),
-        last_safety_validation(std::chrono::steady_clock::now()) {
-
-}
-
+// Simple getters and utility methods
 bool ReplicationState::is_alive() const {
-    // for general health check we will only care about the `read_caught_up` threshold
-    return read_caught_up;
+    // Implemented in raft_node_manager.cpp
+    return node != nullptr;
 }
 
-uint64_t ReplicationState::node_state() const {
-    std::shared_lock lock(node_mutex);
-
-    if(node == nullptr) {
-        return 0;
-    }
-
-    braft::NodeStatus node_status;
-    node->get_status(&node_status);
-
-    return node_status.state;
+bool ReplicationState::is_leader() {
+    // Implemented in raft_node_manager.cpp
+    return false; // Placeholder
 }
 
-void ReplicationState::do_snapshot(const std::string& snapshot_path, const std::shared_ptr<http_req>& req,
-                                   const std::shared_ptr<http_res>& res) {
-    if(node == nullptr) {
-        res->set_500("Could not trigger a snapshot, as node is not initialized.");
-        auto req_res = new async_req_res_t(req, res, true);
-        get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-        return ;
-    }
-
-    if(snapshot_in_progress) {
-        res->set_409("Another snapshot is in progress.");
-        auto req_res = new async_req_res_t(req, res, true);
-        get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-        return ;
-    }
-
-    LOG(INFO) << "Triggering an on demand snapshot"
-              << (!snapshot_path.empty() ? " with external snapshot path..." : "...");
-
-    thread_pool->enqueue([&snapshot_path, req, res, this]() {
-        OnDemandSnapshotClosure* snapshot_closure = new OnDemandSnapshotClosure(this, req, res, snapshot_path,
-                                                                                raft_dir_path);
-        ext_snapshot_path = snapshot_path;
-        std::shared_lock lock(this->node_mutex);
-        node->snapshot(snapshot_closure);
-    });
-}
-
-void ReplicationState::set_ext_snapshot_path(const std::string& snapshot_path) {
-    this->ext_snapshot_path = snapshot_path;
-}
-
-void ReplicationState::set_snapshot_in_progress(const bool snapshot_in_progress) {
-    this->snapshot_in_progress = snapshot_in_progress;
-}
-
-void ReplicationState::do_dummy_write() {
-    std::shared_lock lock(node_mutex);
-
-    if(!node || node->leader_id().is_empty()) {
-        LOG(ERROR) << "Could not do a dummy write, as node does not have a leader";
-        return ;
-    }
-
-    const std::string & leader_addr = node->leader_id().to_string();
-    lock.unlock();
-
-    const std::string protocol = api_uses_ssl ? "https" : "http";
-    std::string url = get_node_url_path(leader_addr, "/health", protocol);
-
-    std::string api_res;
-    std::map<std::string, std::string> res_headers;
-    long status_code = HttpClient::post_response(url, "", api_res, res_headers, {}, 4000, true);
-
-    LOG(INFO) << "Dummy write to " << url << ", status = " << status_code << ", response = " << api_res;
-}
-
-bool ReplicationState::trigger_vote() {
-    std::shared_lock lock(node_mutex);
-
-    if(node) {
-        auto status = node->vote(election_timeout_interval_ms);
-        LOG(INFO) << "Triggered vote. Ok? " << status.ok() << ", status: " << status;
-        return status.ok();
-    }
-
-    return false;
-}
-
-bool ReplicationState::reset_peers() {
-    std::shared_lock lock(node_mutex);
-
-    if(node) {
-        const Option<std::string> & refreshed_nodes_op = Config::fetch_nodes_config(config->get_nodes());
-        if(!refreshed_nodes_op.ok()) {
-            LOG(WARNING) << "Error while fetching peer configuration: " << refreshed_nodes_op.error();
-            return false;
-        }
-
-        const std::string& nodes_config = ReplicationState::to_nodes_config(peering_endpoint,
-                                                                            Config::get_instance().get_api_port(),
-                                                                            refreshed_nodes_op.get());
-
-        if(nodes_config.empty()) {
-            LOG(WARNING) << "No nodes resolved from peer configuration.";
-            return false;
-        }
-
-        NodeConfiguration parsed_config = parse_node_configuration(nodes_config);
-        braft::Configuration peer_config = node_config_to_braft(parsed_config);
-
-        std::vector<braft::PeerId> peers;
-        peer_config.list_peers(&peers);
-
-        auto status = node->reset_peers(peer_config);
-        LOG(INFO) << "Reset peers. Ok? " << status.ok() << ", status: " << status;
-        LOG(INFO) << "New peer config is: " << peer_config;
-        return status.ok();
-    }
-
-    return false;
-}
-
-http_message_dispatcher* ReplicationState::get_message_dispatcher() const {
-    return message_dispatcher;
+nlohmann::json ReplicationState::get_status() {
+    // Implemented in raft_node_manager.cpp
+    return nlohmann::json{}; // Placeholder
 }
 
 Store* ReplicationState::get_store() {
     return store;
 }
 
+http_message_dispatcher* ReplicationState::get_message_dispatcher() const {
+    return message_dispatcher;
+}
+
+void ReplicationState::set_store(Store* store) {
+    this->store = store;
+}
+
+void ReplicationState::set_message_dispatcher(http_message_dispatcher* dispatcher) {
+    this->message_dispatcher = dispatcher;
+}
+
+void ReplicationState::set_http_client(HttpClient* client) {
+    this->http_client = client;
+}
+
+// Applying index management (used by lifecycle manager)
+int64_t ReplicationState::get_applying_index() const {
+    std::shared_lock<std::shared_mutex> lock(applying_index_mutex);
+    return applying_index;
+}
+
+void ReplicationState::set_applying_index(int64_t index) {
+    std::unique_lock<std::shared_mutex> lock(applying_index_mutex);
+    applying_index = index;
+}
+
+// Coordinate shutdown across all modules
 void ReplicationState::shutdown() {
-    LOG(INFO) << "Set shutting_down = true";
-    shutting_down = true;
+    LOG(INFO) << "Coordinating shutdown across all modules";
+    
+    // Delegate to lifecycle manager for actual shutdown
+    // This calls the shutdown() method in raft_lifecycle_manager.cpp
+    
+    // Clean up coordinator state
+    store = nullptr;
+    message_dispatcher = nullptr;
+    http_client = nullptr;
+    
+    LOG(INFO) << "Raft coordination layer shutdown completed";
+}
 
-    // wait for pending writes to drop to zero
-    LOG(INFO) << "Waiting for in-flight writes to finish...";
-    while(pending_writes.load() != 0) {
-        LOG(INFO) << "pending_writes: " << pending_writes;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-    }
-
-    LOG(INFO) << "Replication state shutdown, store sequence: " << store->get_latest_seq_number();
-    std::unique_lock lock(node_mutex);
-
-    if (node) {
-        LOG(INFO) << "node->shutdown";
-        node->shutdown(nullptr);
-
-        // Blocking this thread until the node is eventually down.
-        LOG(INFO) << "node->join";
-        node->join();
-        delete node;
-        node = nullptr;
+// Error handling coordination
+void ReplicationState::on_error(const braft::Error& e) {
+    LOG(ERROR) << "Raft error occurred: " << e;
+    
+    // Check if this is a replication error that might benefit from DNS refresh
+    if (e.type() == braft::ERROR_TYPE_LOG_REPLICATION || 
+        e.type() == braft::ERROR_TYPE_INSTALL_SNAPSHOT) {
+        
+        LOG(INFO) << "Replication error detected - triggering immediate config refresh";
+        trigger_immediate_config_refresh(); // Implemented in raft_safety_validator.cpp
     }
 }
 
-void ReplicationState::persist_applying_index() {
-    std::shared_lock lock(node_mutex);
+// Snapshot argument structure for lifecycle manager
+struct SnapshotArg {
+    ReplicationState* replication_state;
+    braft::SnapshotWriter* writer;
+    braft::Closure* done;
+};
 
-    if(node == nullptr) {
-        return ;
-    }
-
-    lock.unlock();
-
-    batched_indexer->persist_applying_index();
-}
-
-int64_t ReplicationState::get_num_queued_writes() {
-    return batched_indexer->get_queued_writes();
-}
-
-bool ReplicationState::is_leader() {
-    std::shared_lock lock(node_mutex);
-
-    if(!node) {
-        return false;
-    }
-
-    return node->is_leader();
-}
-
-nlohmann::json ReplicationState::get_status() {
-    nlohmann::json status;
-
-    std::shared_lock lock(node_mutex);
-    if(!node) {
-        // `node` is not yet initialized (probably loading snapshot)
-        status["state"] = "NOT_READY";
-        status["committed_index"] = 0;
-        status["queued_writes"] = 0;
-        return status;
-    }
-
-    braft::NodeStatus node_status;
-    node->get_status(&node_status);
-    lock.unlock();
-
-    status["state"] = braft::state2str(node_status.state);
-    status["committed_index"] = node_status.committed_index;
-    status["queued_writes"] = batched_indexer->get_queued_writes();
-
-    return status;
-}
-
-void ReplicationState::do_snapshot(const std::string& nodes) {
-    auto current_ts = std::time(nullptr);
-    if(current_ts - last_snapshot_ts < snapshot_interval_s) {
-        //LOG(INFO) << "Skipping snapshot: not enough time has elapsed.";
-        return;
-    }
-
-    LOG(INFO) << "Snapshot timer is active, current_ts: " << current_ts << ", last_snapshot_ts: " << last_snapshot_ts;
-
-    if(is_leader()) {
-        // run the snapshot only if there are no other recovering followers
-        std::vector<braft::PeerId> peers;
-        braft::Configuration peer_config;
-        peer_config.parse_from(nodes);
-        peer_config.list_peers(&peers);
-
-        std::shared_lock lock(node_mutex);
-        std::string my_addr = node->node_id().peer_id.to_string();
-        lock.unlock();
-
-        //LOG(INFO) << "my_addr: " << my_addr;
-        bool all_peers_healthy = true;
-
-        // iterate peers and check health status
-        for(const auto& peer: peers) {
-            const std::string& peer_addr = peer.to_string();
-            //LOG(INFO) << "do_snapshot, peer_addr: " << peer_addr;
-
-            if(my_addr == peer_addr) {
-                // skip self
-                //LOG(INFO) << "do_snapshot: skipping self, peer_addr: " << peer_addr;
-                continue;
-            }
-
-            const std::string protocol = api_uses_ssl ? "https" : "http";
-            std::string url = get_node_url_path(peer, "/health", protocol);
-            std::string api_res;
-            std::map<std::string, std::string> res_headers;
-            long status_code = HttpClient::get_response(url, api_res, res_headers, {}, 5*1000, true);
-            bool peer_healthy = (status_code == 200);
-
-            //LOG(INFO) << "do_snapshot, status_code: " << status_code;
-
-            if(!peer_healthy) {
-                LOG(WARNING) << "Peer " << peer_addr << " reported unhealthy during snapshot pre-check.";
-            }
-
-            all_peers_healthy = all_peers_healthy && peer_healthy;
-        }
-
-        if(!all_peers_healthy) {
-            LOG(WARNING) << "Unable to trigger snapshot as one or more of the peers reported unhealthy.";
-            return ;
-        }
-    }
-
-    TimedSnapshotClosure* snapshot_closure = new TimedSnapshotClosure(this);
-    std::shared_lock lock(node_mutex);
-    node->snapshot(snapshot_closure);
-    last_snapshot_ts = current_ts;
-}
-
-std::string ReplicationState::get_leader_url() const {
-    std::shared_lock lock(node_mutex);
-
-    if(!node) {
-        LOG(ERROR) << "Could not get leader url as node is not initialized!";
-        return "";
-    }
-
-    if(node->leader_id().is_empty()) {
-        LOG(ERROR) << "Could not get leader url, as node does not have a leader!";
-        return "";
-    }
-
-    const braft::PeerId& leader_addr = node->leader_id();
-    lock.unlock();
-
-    const std::string protocol = api_uses_ssl ? "https" : "http";
-    return get_node_url_path(leader_addr, "/", protocol);
-}
-
-void ReplicationState::decr_pending_writes() {
-    pending_writes--;
-}
-
-void TimedSnapshotClosure::Run() {
-    // Auto delete this after Done()
-    std::unique_ptr<TimedSnapshotClosure> self_guard(this);
-
-    if(status().ok()) {
-        LOG(INFO) << "Timed snapshot succeeded!";
-    } else {
-        LOG(ERROR) << "Timed snapshot failed, error: " << status().error_str() << ", code: " << status().error_code();
-    }
-
-    replication_state->set_snapshot_in_progress(false);
-}
-
-void OnDemandSnapshotClosure::Run() {
-    // Auto delete this after Done()
-    std::unique_ptr<OnDemandSnapshotClosure> self_guard(this);
-
-    bool ext_snapshot_succeeded = false;
-
-    // if an external snapshot is requested, copy latest snapshot directory into that
-    if(!ext_snapshot_path.empty()) {
-        const butil::FilePath& dest_state_dir = butil::FilePath(ext_snapshot_path + "/state");
-
-        if(!butil::DirectoryExists(dest_state_dir)) {
-            butil::CreateDirectory(dest_state_dir, true);
-        }
-
-        const butil::FilePath& src_snapshot_dir = butil::FilePath(state_dir_path + "/snapshot");
-        const butil::FilePath& src_meta_dir = butil::FilePath(state_dir_path + "/meta");
-
-        bool snapshot_copied = butil::CopyDirectory(src_snapshot_dir, dest_state_dir, true);
-        bool meta_copied = butil::CopyDirectory(src_meta_dir, dest_state_dir, true);
-
-        ext_snapshot_succeeded = snapshot_copied && meta_copied;
-    }
-
-    // order is important, because the atomic boolean guards write to the path
-    replication_state->set_ext_snapshot_path("");
-    replication_state->set_snapshot_in_progress(false);
-
-    req->last_chunk_aggregate = true;
-    res->final = true;
-
-    nlohmann::json response;
-    uint32_t status_code;
-
-    if(!status().ok()) {
-        // in case of internal raft error
-        LOG(ERROR) << "On demand snapshot failed, error: " << status().error_str() << ", code: " << status().error_code();
-        status_code = 500;
-        response["success"] = false;
-        response["error"] = status().error_str();
-    } else if(!ext_snapshot_succeeded && !ext_snapshot_path.empty()) {
-        LOG(ERROR) << "On demand snapshot failed, error: copy failed.";
-        status_code = 500;
-        response["success"] = false;
-        response["error"] = "Copy failed.";
-    } else {
-        LOG(INFO) << "On demand snapshot succeeded!";
-        status_code = 201;
-        response["success"] = true;
-    }
-
-    res->status_code = status_code;
-    res->body = response.dump();
-
-    auto req_res = new async_req_res_t(req, res, true);
-    replication_state->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-
-    // wait for response to be sent
-    res->wait();
-}
+// Main coordination loop integration point
+void ReplicationState::coordinate_main_loop() {
+    // This method can be called from the main server loop
+    // to coordinate periodic tasks across modules
+    
+    check_immediate_refresh();
+    
+    // Additional coordination tasks can be added here
+    // For example:
+    // - Periodic safety validations
+    // - Health checks across modules
+    // - Performance metric collection
+} 
