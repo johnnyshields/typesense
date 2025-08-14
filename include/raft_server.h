@@ -49,11 +49,11 @@ struct NodeConfiguration {
      * Compares by (config_term, config_version) tuple with uninitialized term handling.
      */
     bool is_newer_than(const NodeConfiguration& other) const {
-        const int64_t kUninitializedTerm = -1;
+        const int64_t uninitialized_term = -1;
         
         // MongoDB pattern: If either term is uninitialized (-1), ignore terms and compare versions only
         // This allows force reconfigs to override other configs using high version numbers
-        if (config_term == kUninitializedTerm || other.config_term == kUninitializedTerm) {
+        if (config_term == uninitialized_term || other.config_term == uninitialized_term) {
             return config_version > other.config_version;
         }
         
