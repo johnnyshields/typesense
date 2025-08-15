@@ -89,51 +89,51 @@ TEST_F(RaftSafetyValidatorTest, ConfigIsSafeWithoutNode) {
     EXPECT_FALSE(result); // Should fail without proper raft node
 }
 
-// Test has_term_quorum_check functionality
-TEST_F(RaftSafetyValidatorTest, HasTermQuorumCheckWithoutNode) {
-    bool result = repl_state->has_term_quorum_check();
+// Test has_valid_term_quorum functionality (MongoDB TLA+ HasValidTermQuorum)
+TEST_F(RaftSafetyValidatorTest, HasValidTermQuorumWithoutNode) {
+    bool result = repl_state->has_valid_term_quorum();
     EXPECT_FALSE(result); // Should fail without raft node
 }
 
-// Test has_config_quorum_check functionality
-TEST_F(RaftSafetyValidatorTest, HasConfigQuorumCheckWithoutNode) {
-    bool result = repl_state->has_config_quorum_check();
+// Test has_valid_config_quorum functionality (MongoDB TLA+ HasValidConfigQuorum)
+TEST_F(RaftSafetyValidatorTest, HasValidConfigQuorumWithoutNode) {
+    bool result = repl_state->has_valid_config_quorum();
     EXPECT_FALSE(result); // Should fail without raft node
 }
 
-// Test are_previous_ops_committed_in_current_config functionality
+// Test are_previous_ops_committed functionality (MongoDB TLA+ ArePreviousOpsCommitted)
 TEST_F(RaftSafetyValidatorTest, ArePreviousOpsCommittedWithoutNode) {
-    bool result = repl_state->are_previous_ops_committed_in_current_config();
+    bool result = repl_state->are_previous_ops_committed();
     EXPECT_FALSE(result); // Should fail without raft node
 }
 
-// Test validate_new_config_quorum functionality
-TEST_F(RaftSafetyValidatorTest, ValidateNewConfigQuorumEmptyConfig) {
+// Test has_quorum_overlap functionality (MongoDB TLA+ HasQuorumOverlap)
+TEST_F(RaftSafetyValidatorTest, HasQuorumOverlapEmptyConfig) {
     NodeConfiguration empty_config;
-    bool result = repl_state->validate_new_config_quorum(empty_config);
+    bool result = repl_state->has_quorum_overlap(empty_config);
     EXPECT_FALSE(result); // Empty config should be invalid
 }
 
-TEST_F(RaftSafetyValidatorTest, ValidateNewConfigQuorumSingleNode) {
+TEST_F(RaftSafetyValidatorTest, HasQuorumOverlapSingleNode) {
     NodeConfiguration single_config = repl_state->parse_node_configuration("node1.example.com:8107:8108");
-    bool result = repl_state->validate_new_config_quorum(single_config);
+    bool result = repl_state->has_quorum_overlap(single_config);
     EXPECT_TRUE(result); // Single node should be valid
 }
 
-TEST_F(RaftSafetyValidatorTest, ValidateNewConfigQuorumThreeNodes) {
+TEST_F(RaftSafetyValidatorTest, HasQuorumOverlapThreeNodes) {
     NodeConfiguration three_config = repl_state->parse_node_configuration(three_node_config);
-    bool result = repl_state->validate_new_config_quorum(three_config);
+    bool result = repl_state->has_quorum_overlap(three_config);
     EXPECT_TRUE(result); // Three nodes should be valid (quorum = 2)
 }
 
-TEST_F(RaftSafetyValidatorTest, ValidateNewConfigQuorumFiveNodes) {
+TEST_F(RaftSafetyValidatorTest, HasQuorumOverlapFiveNodes) {
     NodeConfiguration five_config = repl_state->parse_node_configuration(five_node_config);
-    bool result = repl_state->validate_new_config_quorum(five_config);
+    bool result = repl_state->has_quorum_overlap(five_config);
     EXPECT_TRUE(result); // Five nodes should be valid (quorum = 3)
 }
 
 // Test MongoDB-style joint consensus intersection validation
-TEST_F(RaftSafetyValidatorTest, ValidateNewConfigQuorumJointConsensus) {
+TEST_F(RaftSafetyValidatorTest, HasQuorumOverlapJointConsensus) {
     // Set up current configuration: [A, B, C] (quorum = 2)
     std::string current_config = "nodeA.example.com:8107:8108,nodeB.example.com:8107:8108,nodeC.example.com:8107:8108";
     NodeConfiguration current = repl_state->parse_node_configuration(current_config);
@@ -145,14 +145,14 @@ TEST_F(RaftSafetyValidatorTest, ValidateNewConfigQuorumJointConsensus) {
     // Intersection: [A,B] = 2 nodes >= quorum(2) for both configs
     std::string safe_new_config = "nodeA.example.com:8107:8108,nodeB.example.com:8107:8108,nodeD.example.com:8107:8108";
     NodeConfiguration safe_config = repl_state->parse_node_configuration(safe_new_config);
-    bool safe_result = repl_state->validate_new_config_quorum(safe_config);
+    bool safe_result = repl_state->has_quorum_overlap(safe_config);
     EXPECT_TRUE(safe_result); // Should pass - sufficient intersection
     
     // Test Case 2: Unsafe complete replacement [A,B,C] -> [D,E,F]
     // Intersection: [] = 0 nodes < quorum(2) - would cause split-brain
     std::string unsafe_new_config = "nodeD.example.com:8107:8108,nodeE.example.com:8107:8108,nodeF.example.com:8107:8108";
     NodeConfiguration unsafe_config = repl_state->parse_node_configuration(unsafe_new_config);
-    bool unsafe_result = repl_state->validate_new_config_quorum(unsafe_config);
+    bool unsafe_result = repl_state->has_quorum_overlap(unsafe_config);
     // Note: This test may pass if there's no current config set in the test state
     // The real validation happens when there's an active current configuration
     
@@ -160,7 +160,7 @@ TEST_F(RaftSafetyValidatorTest, ValidateNewConfigQuorumJointConsensus) {
     // Intersection: [A] = 1 node < quorum(2) - unsafe
     std::string minimal_config = "nodeA.example.com:8107:8108,nodeD.example.com:8107:8108,nodeE.example.com:8107:8108";
     NodeConfiguration minimal = repl_state->parse_node_configuration(minimal_config);
-    bool minimal_result = repl_state->validate_new_config_quorum(minimal);
+    bool minimal_result = repl_state->has_quorum_overlap(minimal);
     // Again, may pass without active current config in test environment
 }
 
@@ -189,7 +189,7 @@ TEST_F(RaftSafetyValidatorTest, SafetyValidationEdgeCases) {
     
     for (const auto& config_str : test_configs) {
         NodeConfiguration config = repl_state->parse_node_configuration(config_str);
-        bool quorum_valid = repl_state->validate_new_config_quorum(config);
+        bool quorum_valid = repl_state->has_quorum_overlap(config);
         
         // All valid configurations should pass quorum validation
         EXPECT_TRUE(quorum_valid) << "Failed for config: " << config_str;
@@ -205,11 +205,11 @@ TEST_F(RaftSafetyValidatorTest, SafetyValidationEdgeCases) {
 TEST_F(RaftSafetyValidatorTest, MongoDBTLAPatternsStructure) {
     // Test that the MongoDB TLA+ methods are properly structured
     
-    // config_is_safe should combine all three checks
-    bool config_safe = repl_state->config_is_safe();
-    bool term_check = repl_state->has_term_quorum_check();
-    bool config_check = repl_state->has_config_quorum_check();
-    bool ops_check = repl_state->are_previous_ops_committed_in_current_config();
+            // config_is_safe should combine all three checks
+        bool config_safe = repl_state->config_is_safe();
+        bool term_check = repl_state->has_valid_term_quorum();
+        bool config_check = repl_state->has_valid_config_quorum();
+        bool ops_check = repl_state->are_previous_ops_committed();
     
     // Without proper raft node, all should be false
     EXPECT_FALSE(config_safe);
@@ -232,14 +232,14 @@ TEST_F(RaftSafetyValidatorTest, ThreadSafetySafetyValidation) {
                 try {
                     // Test various safety operations concurrently
                     bool config_safe = repl_state->config_is_safe();
-                    bool term_check = repl_state->has_term_quorum_check();
-                    bool config_check = repl_state->has_config_quorum_check();
-                    bool ops_check = repl_state->are_previous_ops_committed_in_current_config();
+                    bool term_check = repl_state->has_valid_term_quorum();
+                    bool config_check = repl_state->has_valid_config_quorum();
+                    bool ops_check = repl_state->are_previous_ops_committed();
                     
                     // Create a test configuration
                     std::string test_config = "node" + std::to_string(i) + ".example.com:8107:8108";
                     NodeConfiguration config = repl_state->parse_node_configuration(test_config);
-                    bool quorum_valid = repl_state->validate_new_config_quorum(config);
+                    bool quorum_valid = repl_state->has_quorum_overlap(config);
                     
                     if (quorum_valid) {
                         successful_validations++;
@@ -319,7 +319,7 @@ TEST_F(RaftSafetyValidatorTest, ConfigurationSafetyDifferentSizes) {
         EXPECT_EQ(test_case.second, config.total_nodes());
         
         // Test quorum validation
-        bool quorum_valid = repl_state->validate_new_config_quorum(config);
+        bool quorum_valid = repl_state->has_quorum_overlap(config);
         EXPECT_TRUE(quorum_valid);
         
         // Test that quorum math is correct
@@ -348,7 +348,7 @@ TEST_F(RaftSafetyValidatorTest, SafetyValidationMixedNodeTypes) {
     EXPECT_EQ(3, mixed_config_parsed.total_nodes());
     
     // Quorum validation should work with mixed types
-    bool quorum_valid = repl_state->validate_new_config_quorum(mixed_config_parsed);
+    bool quorum_valid = repl_state->has_quorum_overlap(mixed_config_parsed);
     EXPECT_TRUE(quorum_valid);
     
     // Test peer failure handling with mixed configuration
@@ -418,14 +418,14 @@ TEST_F(RaftSafetyValidatorTest, SafetyValidationPerformance) {
     
     // Perform multiple safety validations
     for (int i = 0; i < 1000; ++i) {
-        bool quorum_valid = repl_state->validate_new_config_quorum(large_config);
+        bool quorum_valid = repl_state->has_quorum_overlap(large_config);
         EXPECT_TRUE(quorum_valid);
         
         // These will fail without proper raft node, but should be fast
         repl_state->config_is_safe();
-        repl_state->has_term_quorum_check();
-        repl_state->has_config_quorum_check();
-        repl_state->are_previous_ops_committed_in_current_config();
+        repl_state->has_valid_term_quorum();
+        repl_state->has_valid_config_quorum();
+        repl_state->are_previous_ops_committed();
     }
     
     auto end = std::chrono::high_resolution_clock::now();
@@ -485,17 +485,17 @@ TEST_F(RaftSafetyValidatorTest, SingleNodeConfigurationChanges) {
     // Test single node addition
     NodeConfiguration with_hostname = original.create_single_node_change("node4.example.com:8107:8108", "", 1);
     EXPECT_EQ(4, with_hostname.total_nodes());
-    EXPECT_TRUE(original.is_safe_single_node_change(with_hostname));
+    EXPECT_TRUE(original.validate_config_change(with_hostname));
     
     // Test single node removal
     NodeConfiguration without_node = original.create_single_node_change("", "node2.example.com:8107:8108", 1);
     EXPECT_EQ(2, without_node.total_nodes());
-    EXPECT_TRUE(original.is_safe_single_node_change(without_node));
+    EXPECT_TRUE(original.validate_config_change(without_node));
     
     // Test unsafe: no change
     NodeConfiguration no_change = original;
     no_change.config_version++;
-    EXPECT_FALSE(original.is_safe_single_node_change(no_change));
+    EXPECT_FALSE(original.validate_config_change(no_change));
 }
 
 TEST_F(RaftSafetyValidatorTest, EnhancedSymmetricDifferenceValidation) {
@@ -504,24 +504,24 @@ TEST_F(RaftSafetyValidatorTest, EnhancedSymmetricDifferenceValidation) {
     // Single addition (symmetric difference = 1) - should be valid
     NodeConfiguration add_one = base;
     add_one.hostname_nodes.push_back("node4.example.com:8107:8108");
-    EXPECT_TRUE(base.is_safe_single_node_change(add_one));
+    EXPECT_TRUE(base.validate_config_change(add_one));
     
     // Single removal (symmetric difference = 1) - should be valid
     NodeConfiguration remove_one = base;
     remove_one.hostname_nodes.pop_back();
-    EXPECT_TRUE(base.is_safe_single_node_change(remove_one));
+    EXPECT_TRUE(base.validate_config_change(remove_one));
     
     // Node replacement (symmetric difference = 2) - should be invalid
     NodeConfiguration replace_node = base;
     replace_node.hostname_nodes.pop_back(); // Remove last
     replace_node.hostname_nodes.push_back("replacement.example.com:8107:8108"); // Add different
-    EXPECT_FALSE(base.is_safe_single_node_change(replace_node));
+    EXPECT_FALSE(base.validate_config_change(replace_node));
     
     // Multiple additions (symmetric difference > 1) - should be invalid
     NodeConfiguration add_multiple = base;
     add_multiple.hostname_nodes.push_back("node4.example.com:8107:8108");
     add_multiple.hostname_nodes.push_back("node5.example.com:8107:8108");
-    EXPECT_FALSE(base.is_safe_single_node_change(add_multiple));
+    EXPECT_FALSE(base.validate_config_change(add_multiple));
 }
 
 TEST_F(RaftSafetyValidatorTest, ForceReconfigurationVersionComparison) {
@@ -558,28 +558,28 @@ TEST_F(RaftSafetyValidatorTest, MixedNodeTypeConfigurationChanges) {
     // Add hostname to mixed config
     NodeConfiguration add_hostname = mixed;
     add_hostname.hostname_nodes.push_back("node4.example.com:8107:8108");
-    EXPECT_TRUE(mixed.is_safe_single_node_change(add_hostname));
+    EXPECT_TRUE(mixed.validate_config_change(add_hostname));
     
     // Add IP to mixed config
     NodeConfiguration add_ip = mixed;
     add_ip.ip_nodes.push_back("192.168.1.20:8107:8108");
-    EXPECT_TRUE(mixed.is_safe_single_node_change(add_ip));
+    EXPECT_TRUE(mixed.validate_config_change(add_ip));
     
     // Cross-type replacement (hostname -> IP) should be invalid
     NodeConfiguration cross_replace = mixed;
     cross_replace.hostname_nodes.pop_back(); // Remove hostname
     cross_replace.ip_nodes.push_back("192.168.1.30:8107:8108"); // Add IP
-    EXPECT_FALSE(mixed.is_safe_single_node_change(cross_replace));
+    EXPECT_FALSE(mixed.validate_config_change(cross_replace));
 }
 
 TEST_F(RaftSafetyValidatorTest, NodeConfigurationEdgeCases) {
     // Empty to single node (bootstrap scenario)
     NodeConfiguration empty = repl_state->parse_node_configuration("");
     NodeConfiguration single = repl_state->parse_node_configuration("node1.example.com:8107:8108");
-    EXPECT_TRUE(empty.is_safe_single_node_change(single));
+    EXPECT_TRUE(empty.validate_config_change(single));
     
     // Single to empty (should be valid for single node removal)
-    EXPECT_TRUE(single.is_safe_single_node_change(empty));
+    EXPECT_TRUE(single.validate_config_change(empty));
     
     // Large cluster single change
     std::vector<std::string> many_nodes;
@@ -591,7 +591,7 @@ TEST_F(RaftSafetyValidatorTest, NodeConfigurationEdgeCases) {
     
     NodeConfiguration large_plus_one = large;
     large_plus_one.hostname_nodes.push_back("node11.example.com:8107:8108");
-    EXPECT_TRUE(large.is_safe_single_node_change(large_plus_one));
+    EXPECT_TRUE(large.validate_config_change(large_plus_one));
 }
 
 TEST_F(RaftSafetyValidatorTest, NodeConfigurationPerformance) {
@@ -607,7 +607,7 @@ TEST_F(RaftSafetyValidatorTest, NodeConfigurationPerformance) {
         NodeConfiguration new_config = base.create_single_node_change(node_name, "", 1);
         
         // Validate safety
-        bool is_safe = base.is_safe_single_node_change(new_config);
+        bool is_safe = base.validate_config_change(new_config);
         EXPECT_TRUE(is_safe);
         
         // Check version comparison
@@ -696,9 +696,9 @@ TEST_F(RaftSafetyValidatorTest, ValidationMethodsStability) {
     // These should not crash even without full raft setup
     EXPECT_NO_THROW({
         repl_state->config_is_safe();
-        repl_state->has_term_quorum_check();
-        repl_state->has_config_quorum_check();
-        repl_state->are_previous_ops_committed_in_current_config();
+        repl_state->has_valid_term_quorum();
+        repl_state->has_valid_config_quorum();
+        repl_state->are_previous_ops_committed();
     });
 }
 
@@ -710,9 +710,9 @@ TEST_F(RaftSafetyValidatorTest, QuorumValidationWithoutRaft) {
     
     // Should handle validation gracefully
     EXPECT_NO_THROW({
-        repl_state->validate_new_config_quorum(single_node);
-        repl_state->validate_new_config_quorum(three_nodes);
-        repl_state->validate_new_config_quorum(five_nodes);
+        repl_state->has_quorum_overlap(single_node);
+        repl_state->has_quorum_overlap(three_nodes);
+        repl_state->has_quorum_overlap(five_nodes);
     });
 }
 

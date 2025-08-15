@@ -86,11 +86,11 @@ TEST_F(MongoDBTLASafetyTest, ConfigQuorumCheckValidation) {
     // Test safe single-node changes maintain quorum
     NodeConfiguration three_plus_one = three.create_single_node_change("node4.example.com:8107:8108", "", 1);
     EXPECT_EQ(4, three_plus_one.total_nodes());
-    EXPECT_TRUE(three.is_safe_single_node_change(three_plus_one));
+    EXPECT_TRUE(three.validate_config_change(three_plus_one));
     
     NodeConfiguration three_minus_one = three.create_single_node_change("", "node3.example.com:8107:8108", 1);
     EXPECT_EQ(2, three_minus_one.total_nodes());
-    EXPECT_TRUE(three.is_safe_single_node_change(three_minus_one));
+    EXPECT_TRUE(three.validate_config_change(three_minus_one));
 }
 
 // Test OpCommittedInConfig validation
@@ -107,7 +107,7 @@ TEST_F(MongoDBTLASafetyTest, OpCommittedInConfigValidation) {
     EXPECT_EQ(6, new_config.config_term);
     
     // Verify the change maintains safety
-    EXPECT_TRUE(original.is_safe_single_node_change(new_config));
+    EXPECT_TRUE(original.validate_config_change(new_config));
     EXPECT_TRUE(new_config.is_newer_than(original));
 }
 
@@ -126,8 +126,8 @@ TEST_F(MongoDBTLASafetyTest, NewConfigQuorumValidation) {
     EXPECT_EQ(2, two_node.total_nodes());
     
     // Both changes should be considered safe single-node changes
-    EXPECT_TRUE(three_node.is_safe_single_node_change(four_node));
-    EXPECT_TRUE(three_node.is_safe_single_node_change(two_node));
+    EXPECT_TRUE(three_node.validate_config_change(four_node));
+    EXPECT_TRUE(three_node.validate_config_change(two_node));
 }
 
 // Test mixed hostname/IP configuration safety
@@ -149,8 +149,8 @@ TEST_F(MongoDBTLASafetyTest, MixedConfigurationSafety) {
     EXPECT_EQ(2, mixed_plus_ip.ip_nodes.size());
     
     // Both should be safe
-    EXPECT_TRUE(mixed.is_safe_single_node_change(mixed_plus_hostname));
-    EXPECT_TRUE(mixed.is_safe_single_node_change(mixed_plus_ip));
+    EXPECT_TRUE(mixed.validate_config_change(mixed_plus_hostname));
+    EXPECT_TRUE(mixed.validate_config_change(mixed_plus_ip));
 }
 
 // Test unsafe configuration changes
@@ -163,13 +163,13 @@ TEST_F(MongoDBTLASafetyTest, UnsafeConfigurationChanges) {
     multi_add.hostname_nodes.push_back("node5.example.com:8107:8108");
     multi_add.config_version++;
     
-    EXPECT_FALSE(original.is_safe_single_node_change(multi_add));
+    EXPECT_FALSE(original.validate_config_change(multi_add));
     
     // Test no-change scenario
     NodeConfiguration no_change = original;
     no_change.config_version++;
     
-    EXPECT_FALSE(original.is_safe_single_node_change(no_change));
+    EXPECT_FALSE(original.validate_config_change(no_change));
     
     // Test removing multiple nodes
     NodeConfiguration multi_remove = original;
@@ -177,7 +177,7 @@ TEST_F(MongoDBTLASafetyTest, UnsafeConfigurationChanges) {
     multi_remove.hostname_nodes.push_back("node1.example.com:8107:8108"); // Only keep one
     multi_remove.config_version++;
     
-    EXPECT_FALSE(original.is_safe_single_node_change(multi_remove));
+    EXPECT_FALSE(original.validate_config_change(multi_remove));
 }
 
 // Test configuration metadata and serialization
@@ -228,7 +228,7 @@ TEST_F(MongoDBTLASafetyTest, ConcurrentSafetyOperations) {
                     } else if (j % 3 == 1) {
                         // Test single-node change validation
                         NodeConfiguration changed = base_config.create_single_node_change("node4.example.com:8107:8108", "", i + 1);
-                        if (base_config.is_safe_single_node_change(changed)) {
+                        if (base_config.validate_config_change(changed)) {
                             successful_operations++;
                         } else {
                             failed_operations++;
@@ -277,7 +277,7 @@ TEST_F(MongoDBTLASafetyTest, SafetyCheckPerformance) {
         NodeConfiguration new_config = base_config.create_single_node_change(node_name, "", 1);
         
         // Validate safety
-        bool is_safe = base_config.is_safe_single_node_change(new_config);
+        bool is_safe = base_config.validate_config_change(new_config);
         EXPECT_TRUE(is_safe);
         
         // Check version comparison (MongoDB TLA+ pattern)
@@ -337,7 +337,7 @@ TEST_F(MongoDBTLASafetyTest, EdgeCasesAndErrorHandling) {
     // Should still support safe single-node changes
     NodeConfiguration large_plus_one = large.create_single_node_change("node101.example.com:8107:8108", "", 1);
     EXPECT_EQ(101, large_plus_one.total_nodes());
-    EXPECT_TRUE(large.is_safe_single_node_change(large_plus_one));
+    EXPECT_TRUE(large.validate_config_change(large_plus_one));
 } 
 
 // Additional MongoDB-inspired test cases at the end of the file
@@ -350,27 +350,27 @@ TEST_F(MongoDBTLASafetyTest, SymmetricDifferenceValidation) {
     NodeConfiguration add_one = base;
     add_one.hostname_nodes.push_back("node4.example.com:8107:8108");
     add_one.config_version++;
-    EXPECT_TRUE(base.is_safe_single_node_change(add_one));
+    EXPECT_TRUE(base.validate_config_change(add_one));
     
     // Test valid single removals
     NodeConfiguration remove_one = base;
     remove_one.hostname_nodes.pop_back();
     remove_one.config_version++;
-    EXPECT_TRUE(base.is_safe_single_node_change(remove_one));
+    EXPECT_TRUE(base.validate_config_change(remove_one));
     
     // Test invalid multi-node changes
     NodeConfiguration add_two = base;
     add_two.hostname_nodes.push_back("node4.example.com:8107:8108");
     add_two.hostname_nodes.push_back("node5.example.com:8107:8108");
     add_two.config_version++;
-    EXPECT_FALSE(base.is_safe_single_node_change(add_two));
+    EXPECT_FALSE(base.validate_config_change(add_two));
     
     // Test invalid swap operations (remove one, add one different)
     NodeConfiguration swap = base;
     swap.hostname_nodes.pop_back(); // Remove last
     swap.hostname_nodes.push_back("node4.example.com:8107:8108"); // Add different
     swap.config_version++;
-    EXPECT_FALSE(base.is_safe_single_node_change(swap)); // Symmetric diff = 2
+    EXPECT_FALSE(base.validate_config_change(swap)); // Symmetric diff = 2
 }
 
 // Test MongoDB's uninitialized term handling
@@ -458,7 +458,7 @@ TEST_F(MongoDBTLASafetyTest, QuorumCalculationEdgeCases) {
     // Test single-node changes on large cluster
     NodeConfiguration large_plus_one = large.create_single_node_change("node51.example.com:8107:8108", "", 1);
     EXPECT_EQ(51, large_plus_one.total_nodes());
-    EXPECT_TRUE(large.is_safe_single_node_change(large_plus_one));
+    EXPECT_TRUE(large.validate_config_change(large_plus_one));
 }
 
 // Test MongoDB's configuration change timing and versioning
@@ -537,7 +537,7 @@ TEST_F(MongoDBTLASafetyTest, ConcurrentConfigurationChangeSafety) {
                     NodeConfiguration changed = base_config.create_single_node_change(new_node, "", i * 10 + j);
                     
                     // Validate the change
-                    if (base_config.is_safe_single_node_change(changed)) {
+                    if (base_config.validate_config_change(changed)) {
                         successful_changes++;
                     } else {
                         failed_changes++;

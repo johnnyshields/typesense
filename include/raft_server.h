@@ -125,7 +125,7 @@ struct NodeConfiguration {
      * 
      * TLA+ Reference: TypesenseRaft.tla -> ValidateConfigChange()
      */
-    bool is_safe_single_node_change(const NodeConfiguration& new_config) const {
+    bool validate_config_change(const NodeConfiguration& new_config) const {
         // TLA+ Pattern: Use set symmetric difference to validate single-node changes
         // This ensures that exactly one voting member is added or removed
         // TLA+: Cardinality(added) + Cardinality(removed) = 1
@@ -505,35 +505,55 @@ public:
     bool is_config_safe_for_reconfig() const;
 
     /**
-     * MongoDB TLA+ ConfigIsSafe implementation.
-     * Validates term quorum, config quorum, and committed operations.
-     * This is the comprehensive safety check from MongoDB's TLA+ specifications.
+     * MongoDB TLA+ ConfigIsSafe - comprehensive safety validation.
+     * Combines three critical safety checks: term quorum, config quorum, and committed operations.
+     * This is the master safety check from MongoDB's formally verified TLA+ specifications.
+     * 
+     * TLA+ Reference: TypesenseSafetyProperties.tla -> ConfigIsSafe()
      */
     bool config_is_safe() const;
 
     /**
-     * Check if we have talked to a quorum in the current term (MongoDB TLA+ TermQuorumCheck).
-     * This ensures the leader has established authority in the current term.
+     * MongoDB TLA+ HasValidTermQuorum - ensures leader authority in current term.
+     * Verifies that the current leader has established authority with a quorum
+     * in the current term before allowing configuration changes.
+     * 
+     * TLA+ Reference: TypesenseSafetyProperties.tla -> HasValidTermQuorum()
      */
-    bool has_term_quorum_check() const;
+    bool has_valid_term_quorum() const;
 
     /**
-     * Check if the current config has been acknowledged by a quorum (MongoDB TLA+ ConfigQuorumCheck).
-     * This ensures config consensus before allowing further changes.
+     * MongoDB TLA+ HasValidConfigQuorum - ensures current config is acknowledged by quorum.
+     * Validates that the current configuration has been properly committed
+     * and acknowledged by a majority of nodes before allowing changes.
+     * 
+     * TLA+ Reference: TypesenseSafetyProperties.tla -> HasValidConfigQuorum()
      */
-    bool has_config_quorum_check() const;
+    bool has_valid_config_quorum() const;
 
     /**
-     * Check if operations committed in previous configs are still committed (MongoDB TLA+ OpCommittedInConfig).
-     * This prevents data loss during configuration changes.
+     * MongoDB TLA+ ArePreviousOpsCommitted - prevents data loss during config changes.
+     * Ensures that operations committed in previous configurations remain committed
+     * in the current configuration, preventing data loss during reconfiguration.
+     * 
+     * TLA+ Reference: TypesenseSafetyProperties.tla -> ArePreviousOpsCommitted()
      */
-    bool are_previous_ops_committed_in_current_config() const;
+    bool are_previous_ops_committed() const;
 
     /**
-     * Validate that a quorum of nodes in the new config are alive and reachable.
-     * Implements MongoDB's alive nodes quorum check.
+     * MongoDB HasQuorumOverlap - validate joint consensus safety for configuration changes.
+     * Implements MongoDB's intersection-based safety check to prevent split-brain
+     * scenarios during configuration transitions. The intersection of old and new
+     * node sets must be able to satisfy quorum requirements for both configurations.
+     * 
+     * Examples:
+     * ✅ Safe: [A,B,C] → [A,B,D] (intersection [A,B] = 2 ≥ quorum 2)
+     * ❌ Unsafe: [A,B,C] → [D,E,F] (intersection [] = 0 < quorum 2) - Split-brain risk!
+     * ❌ Unsafe: [A,B,C] → [A,D,E] (intersection [A] = 1 < quorum 2) - Insufficient overlap!
+     * 
+     * TLA+ Reference: TypesenseRaft.tla -> HasQuorumOverlap()
      */
-    bool validate_new_config_quorum(const NodeConfiguration& new_config) const;
+    bool has_quorum_overlap(const NodeConfiguration& new_config) const;
 
     /**
      * Get the current Raft term for configuration versioning.
@@ -630,10 +650,10 @@ private:
     bool remove_node_safe(const std::string& node_to_remove);
     bool is_config_safe_for_reconfig() const;
     bool config_is_safe() const;
-    bool has_term_quorum_check() const;
-    bool has_config_quorum_check() const;
-    bool are_previous_ops_committed_in_current_config() const;
-    bool validate_new_config_quorum(const NodeConfiguration& new_config) const;
+    bool has_valid_term_quorum() const;
+    bool has_valid_config_quorum() const;
+    bool are_previous_ops_committed() const;
+    bool has_quorum_overlap(const NodeConfiguration& new_config) const;
     
     // Helper methods
     bool is_self_node(const std::string& node_spec) const;

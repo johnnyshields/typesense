@@ -56,14 +56,14 @@ bool ReplicationState::add_node_safe(const std::string& node_to_add) {
     NodeConfiguration new_config = current_node_config.create_single_node_change(node_to_add, "", get_current_term());
     
     // Step 4: Basic safety validation (prevent obvious errors)
-    if (!current_node_config.is_safe_single_node_change(new_config)) {
+    if (!current_node_config.validate_config_change(new_config)) {
         LOG(WARNING) << "Single-node change validation failed for adding: " << node_to_add;
         return false;
     }
     
-    // Step 5: Basic quorum validation
-    if (!validate_new_config_quorum(new_config)) {
-        LOG(WARNING) << "New configuration would not have valid quorum";
+    // Step 5: Joint consensus validation (MongoDB HasQuorumOverlap)
+    if (!has_quorum_overlap(new_config)) {
+        LOG(WARNING) << "New configuration would not have valid quorum overlap";
         return false;
     }
     lock.unlock();
@@ -96,14 +96,14 @@ bool ReplicationState::remove_node_safe(const std::string& node_to_remove) {
     NodeConfiguration new_config = current_node_config.create_single_node_change("", node_to_remove, get_current_term());
     
     // Step 4: Basic safety validation (prevent obvious errors)
-    if (!current_node_config.is_safe_single_node_change(new_config)) {
+    if (!current_node_config.validate_config_change(new_config)) {
         LOG(WARNING) << "Single-node change validation failed for removing: " << node_to_remove;
         return false;
     }
     
-    // Step 5: Basic quorum validation
-    if (!validate_new_config_quorum(new_config)) {
-        LOG(WARNING) << "New configuration would not have valid quorum";
+    // Step 5: Joint consensus validation (MongoDB HasQuorumOverlap)
+    if (!has_quorum_overlap(new_config)) {
+        LOG(WARNING) << "New configuration would not have valid quorum overlap";
         return false;
     }
     
@@ -182,22 +182,22 @@ bool ReplicationState::config_is_safe() const {
     
     // Check 1: TermQuorumCheck - Ensures leader authority in current term
     // TLA+: HasValidTermQuorum(s)
-    if (!has_term_quorum_check()) {
-        LOG(DEBUG) << "TermQuorumCheck failed - not safe for config changes";
+    if (!has_valid_term_quorum()) {
+        LOG(DEBUG) << "HasValidTermQuorum failed - not safe for config changes";
         return false;
     }
     
     // Check 2: ConfigQuorumCheck - Ensures current config is acknowledged by quorum
     // TLA+: HasValidConfigQuorum(s)
-    if (!has_config_quorum_check()) {
-        LOG(DEBUG) << "ConfigQuorumCheck failed - not safe for config changes";
+    if (!has_valid_config_quorum()) {
+        LOG(DEBUG) << "HasValidConfigQuorum failed - not safe for config changes";
         return false;
     }
     
     // Check 3: OpCommittedInConfig - Ensures no data loss during config changes
     // TLA+: ArePreviousOpsCommitted(s)
-    if (!are_previous_ops_committed_in_current_config()) {
-        LOG(DEBUG) << "OpCommittedInConfig failed - not safe for config changes";
+    if (!are_previous_ops_committed()) {
+        LOG(DEBUG) << "ArePreviousOpsCommitted failed - not safe for config changes";
         return false;
     }
     
@@ -205,7 +205,7 @@ bool ReplicationState::config_is_safe() const {
     return true;
 }
 
-bool ReplicationState::has_term_quorum_check() const {
+bool ReplicationState::has_valid_term_quorum() const {
     // MongoDB TLA+ TermQuorumCheck pattern
     // Ensures that the current leader has authority in the current term
     
@@ -245,7 +245,7 @@ bool ReplicationState::has_term_quorum_check() const {
     return false;
 }
 
-bool ReplicationState::has_config_quorum_check() const {
+bool ReplicationState::has_valid_config_quorum() const {
     // MongoDB TLA+ ConfigQuorumCheck pattern  
     // Ensures that the current configuration is acknowledged by a quorum of nodes
     
@@ -289,7 +289,7 @@ bool ReplicationState::has_config_quorum_check() const {
     return false;
 }
 
-bool ReplicationState::are_previous_ops_committed_in_current_config() const {
+bool ReplicationState::are_previous_ops_committed() const {
     // MongoDB TLA+ OpCommittedInConfig pattern
     // Ensures that operations from previous configurations are committed before changing config
     
@@ -333,7 +333,7 @@ bool ReplicationState::are_previous_ops_committed_in_current_config() const {
     return true;
 }
 
-bool ReplicationState::validate_new_config_quorum(const NodeConfiguration& new_config) const {
+bool ReplicationState::has_quorum_overlap(const NodeConfiguration& new_config) const {
     // Validate that the new configuration can achieve quorum with proper joint consensus safety
     
     size_t new_total_nodes = new_config.total_nodes();

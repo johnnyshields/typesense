@@ -172,6 +172,21 @@ struct NodeConfiguration {
 
 Our implementation incorporates **MongoDB's formally verified TLA+ safety patterns** to ensure correctness and prevent data loss during configuration changes.
 
+#### **2.1.0 Naming Convention**
+
+We maintain consistent naming between TLA+ specifications and C++ implementation:
+
+| **TLA+ Method** | **C++ Method** | **Purpose** |
+|-----------------|----------------|-------------|
+| `ConfigIsSafe()` | `config_is_safe()` | Master safety validation |
+| `HasValidTermQuorum()` | `has_valid_term_quorum()` | Leader authority check |
+| `HasValidConfigQuorum()` | `has_valid_config_quorum()` | Config consensus check |
+| `ArePreviousOpsCommitted()` | `are_previous_ops_committed()` | Data loss prevention |
+| `HasQuorumOverlap()` | `has_quorum_overlap()` | Joint consensus validation |
+| `ValidateConfigChange()` | `validate_config_change()` | Single-node change safety |
+
+**Convention**: TLA+ uses `PascalCase`, C++ uses `snake_case` for the same logical operations.
+
 #### **2.1.1 ConfigIsSafe - Master Safety Check**
 
 The `config_is_safe()` method implements MongoDB's comprehensive safety validation:
@@ -429,8 +444,8 @@ bool NodeConfiguration::is_newer_than(const NodeConfiguration& other) const {
 #### **2.4.1 New Configuration Quorum Validation**
 
 ```cpp
-bool ReplicationState::validate_new_config_quorum(const NodeConfiguration& new_config) const {
-    // MongoDB's HasQuorumOverlap implementation for joint consensus safety
+bool ReplicationState::has_quorum_overlap(const NodeConfiguration& new_config) const {
+    // TLA+ HasQuorumOverlap - MongoDB's joint consensus safety implementation
     
     size_t new_total_nodes = new_config.total_nodes();
     if (new_total_nodes == 0) {
@@ -496,14 +511,14 @@ bool ReplicationState::validate_new_config_quorum(const NodeConfiguration& new_c
 1. **Safety Validation**
    ```
    is_config_safe_for_reconfig() → Basic checks (leader, committed entries, quorum)
-   config_is_safe()              → MongoDB TLA+ comprehensive validation
+   config_is_safe()              → TLA+ ConfigIsSafe (comprehensive MongoDB validation)
    ```
 
 2. **Single-Node Validation**
    ```
    create_single_node_change()     → Generate new configuration
-   is_safe_single_node_change()    → Symmetric difference validation
-   validate_new_config_quorum()    → MongoDB joint consensus validation
+   validate_config_change()        → TLA+ ValidateConfigChange (symmetric difference)
+   has_quorum_overlap()            → TLA+ HasQuorumOverlap (MongoDB joint consensus)
    ```
 
 3. **Application**
