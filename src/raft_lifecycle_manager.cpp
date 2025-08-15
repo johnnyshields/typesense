@@ -205,7 +205,7 @@ void* ReplicationState::save_snapshot(void* arg) {
 // Load a snapshot to restore state machine
 int ReplicationState::on_snapshot_load(braft::SnapshotReader* reader) {
     // Critical safety check - leader should NEVER load a snapshot
-    CHECK(!node_manager || !node_manager->is_leader_safe_check()) 
+    CHECK(!node_manager || !node_manager->is_leader()) 
         << "Leader is not supposed to load snapshot";
 
     LOG(INFO) << "on_snapshot_load";
@@ -216,7 +216,7 @@ int ReplicationState::on_snapshot_load(braft::SnapshotReader* reader) {
         node_manager->refresh_catchup_status(false);
     }
 
-    // Load snapshot from leader, replacing the running StateMachine
+    // Load analytics snapshot from leader, replacing the running StateMachine
     std::string analytics_snapshot_path = reader->get_path();
     analytics_snapshot_path.append(std::string("/") + analytics_db_snapshot_name);
 

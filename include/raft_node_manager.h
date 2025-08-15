@@ -22,21 +22,21 @@ private:
     // Node ownership
     braft::Node* volatile node;
     mutable std::shared_mutex node_mutex;
-    
+
     // Dependencies (not owned)
     const Config* config;
     Store* store;
     BatchedIndexer* batched_indexer;
-    
+
     // Node configuration
     butil::EndPoint peering_endpoint;
     int api_port;
     int election_timeout_ms;
     bool api_uses_ssl;
-    
+
     // Leader tracking
     butil::atomic<int64_t> leader_term;
-    
+
     // Health status
     std::atomic<bool> read_caught_up;
     std::atomic<bool> write_caught_up;
@@ -49,12 +49,12 @@ public:
                    Store* store,
                    BatchedIndexer* batched_indexer,
                    bool api_uses_ssl);
-    
+
     /**
      * Destructor - ensures proper node cleanup
      */
     ~RaftNodeManager();
-    
+
     /**
      * Initialize and start the Raft node
      * @param fsm The state machine to attach to the node
@@ -71,7 +71,7 @@ public:
                   int election_timeout_ms,
                   const std::string& raft_dir,
                   const std::string& nodes);
-    
+
     /**
      * Wait for the node to become ready (leader or follower with leader)
      * @param timeout_ms Maximum time to wait in milliseconds
@@ -79,121 +79,105 @@ public:
      * @return true if ready, false if timeout or quit
      */
     bool wait_until_ready(int timeout_ms, const std::atomic<bool>& quit_signal);
-    
+
     /**
      * Shutdown the node gracefully
      */
     void shutdown();
-    
+
     /**
      * Apply a task to the Raft log
      * @param task The task to apply
      */
     void apply(braft::Task& task);
-    
+
     /**
      * Trigger a snapshot
      * @param done Closure to call when snapshot completes
      */
     void snapshot(braft::Closure* done);
-    
+
     /**
      * Change cluster peers configuration
      * @param new_conf New configuration
      * @param done Closure to call when complete
      */
     void change_peers(const braft::Configuration& new_conf, braft::Closure* done);
-    
+
     /**
      * Reset peers (unsafe - only for single node recovery)
      * @param new_conf New configuration
      * @return Status of the operation
      */
     butil::Status reset_peers(const braft::Configuration& new_conf);
-    
+
     /**
      * Trigger an election
      * @return Status of the operation
      */
     butil::Status trigger_vote();
-    
+
     /**
      * Get current node status
      * @param status Output parameter for status
      */
     void get_status(braft::NodeStatus* status) const;
-    
+
     /**
-     * Check if this node is the leader
+     * Check if this node is the leader (thread-safe)
      */
     bool is_leader() const;
-    
-    /**
-     * Thread-safe check if this node is leader (for safety assertions)
-     * Used for critical safety checks like snapshot loading
-     */
-    bool is_leader_safe_check() const;
 
     /**
      * Get the leader's peer ID
      */
     braft::PeerId leader_id() const;
-    
+
     /**
      * Get node ID
      */
     braft::NodeId node_id() const;
-    
-    /**
-     * Check if node has a leader (either is leader or knows who leader is)
-     */
-    bool has_leader() const;
-
-    /**
-     * Check if node is initialized and ready
-     */
-    bool is_node_ready() const;
 
     /**
      * Check if node is ready to serve reads
      */
     bool is_read_ready() const { return read_caught_up; }
-    
+
     /**
      * Check if node is ready to serve writes
      */
     bool is_write_ready() const { return write_caught_up; }
-    
+
     /**
      * Update catchup status based on current state
      * @param log_msg Whether to log status messages
      */
     void refresh_catchup_status(bool log_msg);
-    
+
     /**
      * Get current leader term
      */
     int64_t get_leader_term() const { 
         return leader_term.load(butil::memory_order_acquire); 
     }
-    
+
     /**
      * Set leader term (called by state machine)
      */
     void set_leader_term(int64_t term) { 
         leader_term.store(term, butil::memory_order_release); 
     }
-    
+
     /**
      * Get JSON status for monitoring
      */
     nlohmann::json get_status() const;
-    
+
     /**
      * Get URL for the current leader
      */
     std::string get_leader_url() const;
-    
+
     /**
      * Refresh node membership
      * @param nodes New nodes configuration

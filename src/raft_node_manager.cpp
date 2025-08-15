@@ -172,11 +172,6 @@ bool RaftNodeManager::is_leader() const {
     return node && node->is_leader();
 }
 
-bool RaftNodeManager::is_leader_safe_check() const {
-    std::shared_lock lock(node_mutex);
-    return node && node->is_leader();
-}
-
 braft::PeerId RaftNodeManager::leader_id() const {
     std::shared_lock lock(node_mutex);
     if (node) {
@@ -191,16 +186,6 @@ braft::NodeId RaftNodeManager::node_id() const {
         return node->node_id();
     }
     return braft::NodeId();
-}
-
-bool RaftNodeManager::has_leader() const {
-    std::shared_lock lock(node_mutex);
-    return node && (!node->is_leader() || !node->leader_id().is_empty());
-}
-
-bool RaftNodeManager::is_node_ready() const {
-    std::shared_lock lock(node_mutex);
-    return node != nullptr;
 }
 
 void RaftNodeManager::refresh_catchup_status(bool log_msg) {
