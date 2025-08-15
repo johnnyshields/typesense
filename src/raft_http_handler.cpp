@@ -9,19 +9,8 @@
 #include <zlib.h>
 #include <logger.h>
 
-RaftHttpHandler::RaftHttpHandler(ReplicationState* state, 
-                                 HttpServer* server, 
-                                 Store* store,
-                                 BatchedIndexer* batched_indexer,
-                                 ThreadPool* thread_pool, 
-                                 http_message_dispatcher* dispatcher,
-                                 const Config* config, 
-                                 bool api_uses_ssl,
-                                 const std::string& raft_dir_path)
-    : replication_state(state), server(server), store(store), 
-      batched_indexer(batched_indexer), thread_pool(thread_pool), 
-      message_dispatcher(dispatcher), config(config), 
-      api_uses_ssl(api_uses_ssl), raft_dir_path(raft_dir_path) {}
+RaftHttpHandler::RaftHttpHandler(ReplicationState* state)
+    : replication_state(state) {}
 
 Option<bool> RaftHttpHandler::handle_gzip(const std::shared_ptr<http_req>& request) {
     if (!request->zstream_initialized) {
@@ -79,7 +68,7 @@ bool RaftHttpHandler::get_alter_in_progress(const std::string& collection_name) 
 
 void RaftHttpHandler::write(const std::shared_ptr<http_req>& request, 
                            const std::shared_ptr<http_res>& response) {
-    if(replication_state->is_shutting_down()) {
+    if(replication_state->get_shutting_down()) {
         response->set_503("Shutting down.");
         response->final = true;
         response->is_alive = false;
@@ -89,9 +78,9 @@ void RaftHttpHandler::write(const std::shared_ptr<http_req>& request,
 
     // reject write if disk space is running out
     auto resource_check = cached_resource_stat_t::get_instance().has_enough_resources(
-        raft_dir_path,
-        config->get_disk_used_max_percentage(), 
-        config->get_memory_used_max_percentage()
+        replication_state->get_raft_dir_path(),
+        replication_state->get_config()->get_disk_used_max_percentage(), 
+        replication_state->get_config()->get_memory_used_max_percentage()
     );
 
     if (resource_check != cached_resource_stat_t::OK && request->do_resource_check()) {
@@ -99,25 +88,25 @@ void RaftHttpHandler::write(const std::shared_ptr<http_req>& request,
                           std::string(magic_enum::enum_name(resource_check)));
         response->final = true;
         auto req_res = new async_req_res_t(request, response, true);
-        return message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
+        return replication_state->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
     }
 
-    if(config->get_skip_writes() && request->path_without_query != "/config") {
+    if(replication_state->get_config()->get_skip_writes() && request->path_without_query != "/config") {
         response->set_422("Skipping writes.");
         response->final = true;
         auto req_res = new async_req_res_t(request, response, true);
-        return message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
+        return replication_state->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
     }
 
     route_path* rpath = nullptr;
-    bool route_found = server->get_route(request->route_hash, &rpath);
+    bool route_found = replication_state->get_server()->get_route(request->route_hash, &rpath);
 
     if(route_found && rpath->handler == patch_update_collection) {
         if(get_alter_in_progress(request->params["collection"])) {
             response->set_422("Another collection update operation is in progress.");
             response->final = true;
             auto req_res = new async_req_res_t(request, response, true);
-            return message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
+            return replication_state->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
         }
     }
 
@@ -141,7 +130,7 @@ void RaftHttpHandler::write(const std::shared_ptr<http_req>& request,
             response->set_422(res.error());
             response->final = true;
             auto req_res = new async_req_res_t(request, response, true);
-            return message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
+            return replication_state->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
         }
     }
 
@@ -158,12 +147,12 @@ void RaftHttpHandler::write(const std::shared_ptr<http_req>& request,
     task.done = new ReplicationClosure(request, response);
 
     // To avoid ABA problem
-    task.expected_term = replication_state->get_leader_term();
+    task.expected_term = replication_state->get_leader_term().load(butil::memory_order_relaxed);
 
     // Now the task is applied to the group
     node->apply(task);
 
-    replication_state->incr_pending_writes();
+    replication_state->get_pending_writes()++;
 }
 
 void RaftHttpHandler::write_to_leader(const std::shared_ptr<http_req>& request, 
@@ -184,7 +173,7 @@ void RaftHttpHandler::write_to_leader(const std::shared_ptr<http_req>& request,
 
         response->set_500("Could not find a leader.");
         auto req_res = new async_req_res_t(request, response, true);
-        return message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
+        return replication_state->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
     }
 
     if (response->proxied_stream) {
@@ -203,8 +192,8 @@ void RaftHttpHandler::write_to_leader(const std::shared_ptr<http_req>& request,
     const std::string& scheme = std::string(raw_req->scheme->name.base, raw_req->scheme->name.len);
     const std::string url = get_node_url_path(leader_addr, path, scheme);
 
-    thread_pool->enqueue([request, response, http_server, path, url, this]() {
-        replication_state->incr_pending_writes();
+    replication_state->get_thread_pool()->enqueue([request, response, http_server, path, url, this]() {
+        replication_state->get_pending_writes()++;
 
         std::map<std::string, std::string> res_headers;
 
@@ -252,8 +241,8 @@ void RaftHttpHandler::write_to_leader(const std::shared_ptr<http_req>& request,
         }
 
         auto req_res = new async_req_res_t(request, response, true);
-        message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-        replication_state->decr_pending_writes();
+        replication_state->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
+        replication_state->get_pending_writes()--;
     });
 }
 

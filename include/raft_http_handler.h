@@ -23,28 +23,12 @@ class BatchedIndexer;
 class RaftHttpHandler {
 private:
     ReplicationState* replication_state;
-    HttpServer* server;
-    Store* store;
-    ThreadPool* thread_pool;
-    http_message_dispatcher* message_dispatcher;
-    BatchedIndexer* batched_indexer;
-    const Config* config;
-    bool api_uses_ssl;
-    std::string raft_dir_path;
 
 public:
     /**
      * Constructor for RaftHttpHandler
      */
-    RaftHttpHandler(ReplicationState* state, 
-                   HttpServer* server, 
-                   Store* store,
-                   BatchedIndexer* batched_indexer,
-                   ThreadPool* thread_pool, 
-                   http_message_dispatcher* dispatcher,
-                   const Config* config, 
-                   bool api_uses_ssl,
-                   const std::string& raft_dir_path);
+    explicit RaftHttpHandler(ReplicationState* state);
 
     /**
      * Handle gzip compression for incoming requests
