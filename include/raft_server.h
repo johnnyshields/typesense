@@ -8,15 +8,21 @@
 #include <braft/protobuf_file.h>         // braft::ProtoBufFile
 #include <rocksdb/db.h>
 #include <future>
+#include <memory>
 
 #include "http_data.h"
 #include "threadpool.h"
 #include "http_server.h"
 #include "batched_indexer.h"
 #include "cached_resource_stat.h"
+#include "option.h"
 
+// Forward declarations
 class Store;
 class ReplicationState;
+class RaftConfigManager;
+class RaftHttpHandler;
+class RaftNodeManager;
 
 // Implements the callback for the state machine
 class ReplicationClosure : public braft::Closure {
@@ -25,9 +31,9 @@ private:
     const std::shared_ptr<http_res> response;
 
 public:
-    ReplicationClosure(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response): request(request), response(response) {
-
-    }
+    ReplicationClosure(const std::shared_ptr<http_req>& request, 
+                      const std::shared_ptr<http_res>& response)
+        : request(request), response(response) {}
 
     ~ReplicationClosure() {
         //LOG(INFO) << "~ReplicationClosure req use count " << request.use_count();
@@ -47,9 +53,7 @@ public:
 // Closure that fires when refresh nodes operation finishes
 class RefreshNodesClosure : public braft::Closure {
 public:
-
     RefreshNodesClosure() {}
-
     ~RefreshNodesClosure() {}
 
     void Run() {
@@ -64,7 +68,7 @@ public:
     }
 };
 
-// Closure that fires when requested
+// Forward declarations for snapshot closures
 class OnDemandSnapshotClosure : public braft::Closure {
 private:
     ReplicationState* replication_state;
@@ -74,15 +78,12 @@ private:
     const std::string state_dir_path;
 
 public:
-
-    OnDemandSnapshotClosure(ReplicationState *replication_state, const std::shared_ptr<http_req>& req,
-                            const std::shared_ptr<http_res>& res, const std::string& ext_snapshot_path,
-                            const std::string& state_dir_path) :
-        replication_state(replication_state), req(req), res(res), ext_snapshot_path(ext_snapshot_path),
-        state_dir_path(state_dir_path) {}
-
+    OnDemandSnapshotClosure(ReplicationState *replication_state, 
+                            const std::shared_ptr<http_req>& req,
+                            const std::shared_ptr<http_res>& res, 
+                            const std::string& ext_snapshot_path,
+                            const std::string& state_dir_path);
     ~OnDemandSnapshotClosure() {}
-
     void Run();
 };
 
@@ -91,21 +92,20 @@ private:
     ReplicationState* replication_state;
 
 public:
-
-    TimedSnapshotClosure(ReplicationState *replication_state) : replication_state(replication_state){}
-
+    TimedSnapshotClosure(ReplicationState *replication_state);
     ~TimedSnapshotClosure() {}
 
     void Run();
 };
 
-// Implements braft::StateMachine.
+// Implements braft::StateMachine
 class ReplicationState : public braft::StateMachine {
 private:
     static constexpr const char* db_snapshot_name = "db_snapshot";
     static constexpr const char* analytics_db_snapshot_name = "analytics_db_snapshot";
     static constexpr const char* BATCHED_INDEXER_STATE_KEY = "$BI";
 
+    // Core members
     mutable std::shared_mutex node_mutex;
 
     braft::Node* volatile node;
@@ -127,6 +127,7 @@ private:
     const size_t num_collections_parallel_load;
     const size_t num_documents_parallel_load;
 
+    // State management
     std::atomic<bool> read_caught_up;
     std::atomic<bool> write_caught_up;
 
@@ -150,13 +151,17 @@ private:
 
     butil::EndPoint peering_endpoint;
 
-public:
+    // Manager classes
+    std::unique_ptr<RaftHttpHandler> http_handler;
+    std::unique_ptr<RaftNodeManager> node_manager;
 
+public:
     static constexpr const char* log_dir_name = "log";
     static constexpr const char* meta_dir_name = "meta";
     static constexpr const char* snapshot_dir_name = "snapshot";
 
-    ReplicationState(HttpServer* server, BatchedIndexer* batched_indexer, Store* store, Store* analytics_store,
+    ReplicationState(HttpServer* server, BatchedIndexer* batched_indexer, 
+                     Store* store, Store* analytics_store,
                      ThreadPool* thread_pool, http_message_dispatcher* message_dispatcher,
                      bool api_uses_ssl, const Config* config,
                      size_t num_collections_parallel_load, size_t num_documents_parallel_load);
@@ -168,12 +173,13 @@ public:
               const std::atomic<bool>& quit_abruptly);
 
     // Generic write method for synchronizing all writes
-    void write(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response);
+    void write(const std::shared_ptr<http_req>& request, 
+              const std::shared_ptr<http_res>& response);
 
     // Generic read method for consistent reads, not used for now
     void read(const std::shared_ptr<http_res>& response);
 
-    // updates cluster membership
+    // Updates cluster membership
     void refresh_nodes(const std::string & nodes, const size_t raft_counter,
                        const std::atomic<bool>& reset_peers_on_error);
 
@@ -199,24 +205,35 @@ public:
 
     uint64_t node_state() const;
 
-    // Shut this node down.
+    // Shut this node down
     void shutdown();
 
     int init_db();
 
     Store* get_store();
 
-    // for manual / external snapshots
-    void do_snapshot(const std::string& snapshot_path, const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
+    // For manual / external snapshots
+    void do_snapshot(const std::string& snapshot_path, 
+                    const std::shared_ptr<http_req>& req, 
+                    const std::shared_ptr<http_res>& res);
 
-    static std::string to_nodes_config(const butil::EndPoint &peering_endpoint, const int api_port,
+    // Static configuration methods (delegated to RaftConfigManager)
+    static std::string to_nodes_config(const butil::EndPoint &peering_endpoint, 
+                                       const int api_port,
                                        const std::string &nodes_config);
+
+    static std::string hostname2ipstr(const std::string& hostname);
+
+    static std::string resolve_node_hosts(const std::string& nodes_config);
+
+    // Static gzip handler (delegated to RaftHttpHandler)
+    static Option<bool> handle_gzip(const std::shared_ptr<http_req>& request);
 
     void set_ext_snapshot_path(const std::string &snapshot_path);
 
     void set_snapshot_in_progress(const bool snapshot_in_progress);
 
-    // for timed snapshots
+    // For timed snapshots
     void do_snapshot(const std::string& nodes);
 
     void persist_applying_index();
@@ -235,18 +252,6 @@ public:
         cv.notify_all();
     }
 
-    /**
-     * Resolves a hostname to an IP string.
-     *
-     * @param hostname The hostname to resolve.
-     * @return A string representation of the resolved IP address.
-     *         For IPv6 addresses, the IP will be enclosed in square brackets.
-     *         Returns empty string if resolution fails or hostname is invalid.
-     */
-    static std::string hostname2ipstr(const std::string& hostname);
-
-    static std::string resolve_node_hosts(const std::string& nodes_config);
-
     int64_t get_num_queued_writes();
 
     bool is_leader();
@@ -255,21 +260,20 @@ public:
 
     std::string get_leader_url() const;
 
-    static Option<bool> handle_gzip(const std::shared_ptr<http_req>& request);
-
     void decr_pending_writes();
 
 private:
-
     friend class ReplicationClosure;
+    friend class OnDemandSnapshotClosure;
+    friend class TimedSnapshotClosure;
 
-    // Internal method to start raft node - implementation in raft_lifecycle_manager.cpp
+    // Internal methods (implementation in raft_lifecycle_manager.cpp)
     int start_raft_node(const butil::EndPoint & peering_endpoint, int api_port,
                         int election_timeout_ms, int snapshot_max_byte_count_per_rpc,
                         const std::string & raft_dir, const std::string & nodes,
                         const std::atomic<bool>& quit_abruptly);
 
-    // actual application of writes onto the WAL
+    // Actual application of writes onto the WAL
     void on_apply(braft::Iterator& iter);
 
     struct SnapshotArg {
@@ -319,10 +323,12 @@ private:
         LOG(INFO) << "Node stops following " << ctx;
     }
 
-    void write_to_leader(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response);
+    void write_to_leader(const std::shared_ptr<http_req>& request, 
+                        const std::shared_ptr<http_res>& response);
 
     void do_dummy_write();
 
-    std::string get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
+    std::string get_node_url_path(const braft::PeerId& peer_id, 
+                                  const std::string& path,
                                   const std::string& protocol) const;
 };

@@ -1,26 +1,58 @@
-#include "store.h"
+#include "raft_node_manager.h"
 #include "raft_server.h"
+#include "store.h"
 #include <string_utils.h>
 #include <http_client.h>
 #include "core_api.h"
+#include "config.h"
+#include <logger.h>
+#include <butil/files/file_path.h>
 
-// Node Management and Status Module
-// Extracted from raft_server.cpp for better organization
+RaftNodeManager::RaftNodeManager(ReplicationState* state, 
+                               const Config* config, 
+                               Store* store,
+                               BatchedIndexer* batched_indexer, 
+                               ThreadPool* thread_pool,
+                               http_message_dispatcher* dispatcher, 
+                               bool api_uses_ssl,
+                               const std::string& raft_dir_path,
+                               const butil::EndPoint& peering_endpoint,
+                               int election_timeout_interval_ms,
+                               uint64_t snapshot_interval_s,
+                               std::shared_mutex* node_mutex,
+                               braft::Node* volatile* node,
+                               std::atomic<bool>* read_caught_up,
+                               std::atomic<bool>* write_caught_up,
+                               std::atomic<size_t>* pending_writes,
+                               std::atomic<bool>* snapshot_in_progress,
+                               uint64_t* last_snapshot_ts,
+                               std::string* ext_snapshot_path)
+    : replication_state(state), config(config), store(store),
+      batched_indexer(batched_indexer), thread_pool(thread_pool),
+      message_dispatcher(dispatcher), api_uses_ssl(api_uses_ssl),
+      raft_dir_path(raft_dir_path), peering_endpoint(peering_endpoint),
+      election_timeout_interval_ms(election_timeout_interval_ms),
+      snapshot_interval_s(snapshot_interval_s),
+      node_ptr(node), node_mutex_ptr(node_mutex),
+      read_caught_up_ptr(read_caught_up), write_caught_up_ptr(write_caught_up),
+      pending_writes_ptr(pending_writes), snapshot_in_progress_ptr(snapshot_in_progress),
+      last_snapshot_ts_ptr(last_snapshot_ts), ext_snapshot_path_ptr(ext_snapshot_path) {}
 
-void ReplicationState::refresh_nodes(const std::string & nodes, const size_t raft_counter,
-                                     const std::atomic<bool>& reset_peers_on_error) {
-    std::shared_lock lock(node_mutex);
+void RaftNodeManager::refresh_nodes(const std::string& nodes, 
+                                   const size_t raft_counter,
+                                   const std::atomic<bool>& reset_peers_on_error) {
+    std::shared_lock lock(*node_mutex_ptr);
 
-    if(!node) {
+    if(!*node_ptr) {
         LOG(WARNING) << "Node state is not initialized: unable to refresh nodes.";
-        return ;
+        return;
     }
 
     braft::Configuration new_conf;
     new_conf.parse_from(nodes);
 
     braft::NodeStatus nodeStatus;
-    node->get_status(&nodeStatus);
+    (*node_ptr)->get_status(&nodeStatus);
 
     LOG(INFO) << "Term: " << nodeStatus.term
               << ", pending_queue: " << nodeStatus.pending_queue_size
@@ -28,15 +60,15 @@ void ReplicationState::refresh_nodes(const std::string & nodes, const size_t raf
               << ", committed: " << nodeStatus.committed_index
               << ", known_applied: " << nodeStatus.known_applied_index
               << ", applying: " << nodeStatus.applying_index
-              << ", pending_writes: " << pending_writes
+              << ", pending_writes: " << *pending_writes_ptr
               << ", queued_writes: " << batched_indexer->get_queued_writes()
               << ", local_sequence: " << store->get_latest_seq_number();
 
-    if(node->is_leader()) {
+    if((*node_ptr)->is_leader()) {
         RefreshNodesClosure* refresh_nodes_done = new RefreshNodesClosure;
-        node->change_peers(new_conf, refresh_nodes_done);
+        (*node_ptr)->change_peers(new_conf, refresh_nodes_done);
     } else {
-        if(node->leader_id().is_empty()) {
+        if((*node_ptr)->leader_id().is_empty()) {
             // When node is not a leader, does not have a leader and is also a single-node cluster,
             // we forcefully reset its peers.
             // NOTE: `reset_peers()` is not a safe call to make as we give up on consistency and consensus guarantees.
@@ -48,39 +80,39 @@ void ReplicationState::refresh_nodes(const std::string & nodes, const size_t raf
 
             if(latest_nodes.size() == 1 || (raft_counter > 0 && reset_peers_on_error)) {
                 LOG(WARNING) << "Node with no leader. Resetting peers of size: " << latest_nodes.size();
-                node->reset_peers(new_conf);
+                (*node_ptr)->reset_peers(new_conf);
             } else {
                 LOG(WARNING) << "Multi-node with no leader: refusing to reset peers.";
             }
 
-            return ;
+            return;
         }
     }
 }
 
-void ReplicationState::refresh_catchup_status(bool log_msg) {
-    std::shared_lock lock(node_mutex);
-    if(node == nullptr ) {
-        read_caught_up = write_caught_up = false;
-        return ;
+void RaftNodeManager::refresh_catchup_status(bool log_msg) {
+    std::shared_lock lock(*node_mutex_ptr);
+    if(*node_ptr == nullptr) {
+        *read_caught_up_ptr = *write_caught_up_ptr = false;
+        return;
     }
 
-    bool is_leader = node->is_leader();
-    bool leader_or_follower = (is_leader || !node->leader_id().is_empty());
+    bool is_leader = (*node_ptr)->is_leader();
+    bool leader_or_follower = (is_leader || !(*node_ptr)->leader_id().is_empty());
     if(!leader_or_follower) {
-        read_caught_up = write_caught_up = false;
-        return ;
+        *read_caught_up_ptr = *write_caught_up_ptr = false;
+        return;
     }
 
     braft::NodeStatus n_status;
-    node->get_status(&n_status);
+    (*node_ptr)->get_status(&n_status);
     lock.unlock();
 
     // `known_applied_index` guaranteed to be atleast 1 if raft log is available (after snapshot loading etc.)
     if(n_status.known_applied_index == 0) {
         LOG_IF(ERROR, log_msg) << "Node not ready yet (known_applied_index is 0).";
-        read_caught_up = write_caught_up = false;
-        return ;
+        *read_caught_up_ptr = *write_caught_up_ptr = false;
+        return;
     }
 
     // work around for: https://github.com/baidu/braft/issues/277#issuecomment-823080171
@@ -95,41 +127,41 @@ void ReplicationState::refresh_catchup_status(bool log_msg) {
 
     if (apply_lag > healthy_read_lag) {
         LOG_IF(ERROR, log_msg) << apply_lag << " lagging entries > healthy read lag of " << healthy_read_lag;
-        this->read_caught_up = false;
+        *read_caught_up_ptr = false;
     } else {
         if(num_queued_writes > healthy_read_lag) {
             LOG_IF(ERROR, log_msg) << num_queued_writes << " queued writes > healthy read lag of " << healthy_read_lag;
-            this->read_caught_up = false;
+            *read_caught_up_ptr = false;
         } else {
-            this->read_caught_up = true;
+            *read_caught_up_ptr = true;
         }
     }
 
     if (apply_lag > healthy_write_lag) {
         LOG_IF(ERROR, log_msg) << apply_lag << " lagging entries > healthy write lag of " << healthy_write_lag;
-        this->write_caught_up = false;
+        *write_caught_up_ptr = false;
     } else {
         if(num_queued_writes > healthy_write_lag) {
             LOG_IF(ERROR, log_msg) << num_queued_writes << " queued writes > healthy write lag of " << healthy_write_lag;
-            this->write_caught_up = false;
+            *write_caught_up_ptr = false;
         } else {
-            this->write_caught_up = true;
+            *write_caught_up_ptr = true;
         }
     }
 
-    if(is_leader || !this->read_caught_up) {
+    if(is_leader || !*read_caught_up_ptr) {
         // no need to re-check status with leader
-        return ;
+        return;
     }
 
     lock.lock();
 
-    if(node->leader_id().is_empty()) {
+    if((*node_ptr)->leader_id().is_empty()) {
         LOG(ERROR) << "Could not get leader status, as node does not have a leader!";
-        return ;
+        return;
     }
 
-    const braft::PeerId& leader_addr = node->leader_id();
+    const braft::PeerId& leader_addr = (*node_ptr)->leader_id();
     lock.unlock();
 
     const std::string protocol = api_uses_ssl ? "https" : "http";
@@ -146,9 +178,9 @@ void ReplicationState::refresh_catchup_status(bool log_msg) {
             if(leader_committed_index <= n_status.committed_index) {
                 // this can happen due to network latency in making the /status call
                 // we will refrain from changing current status
-                return ;
+                return;
             }
-            this->read_caught_up = ((leader_committed_index - n_status.committed_index) < healthy_read_lag);
+            *read_caught_up_ptr = ((leader_committed_index - n_status.committed_index) < healthy_read_lag);
         } else {
             // we will refrain from changing current status
             LOG(ERROR) << "Error, `committed_index` key not found in /status response from leader.";
@@ -159,29 +191,29 @@ void ReplicationState::refresh_catchup_status(bool log_msg) {
     }
 }
 
-bool ReplicationState::is_alive() const {
+bool RaftNodeManager::is_alive() const {
     // for general health check we will only care about the `read_caught_up` threshold
-    return read_caught_up;
+    return *read_caught_up_ptr;
 }
 
-uint64_t ReplicationState::node_state() const {
-    std::shared_lock lock(node_mutex);
+uint64_t RaftNodeManager::node_state() const {
+    std::shared_lock lock(*node_mutex_ptr);
 
-    if(node == nullptr) {
+    if(*node_ptr == nullptr) {
         return 0;
     }
 
     braft::NodeStatus node_status;
-    node->get_status(&node_status);
+    (*node_ptr)->get_status(&node_status);
 
     return node_status.state;
 }
 
-bool ReplicationState::trigger_vote() {
-    std::shared_lock lock(node_mutex);
+bool RaftNodeManager::trigger_vote() {
+    std::shared_lock lock(*node_mutex_ptr);
 
-    if(node) {
-        auto status = node->vote(election_timeout_interval_ms);
+    if(*node_ptr) {
+        auto status = (*node_ptr)->vote(election_timeout_interval_ms);
         LOG(INFO) << "Triggered vote. Ok? " << status.ok() << ", status: " << status;
         return status.ok();
     }
@@ -189,19 +221,21 @@ bool ReplicationState::trigger_vote() {
     return false;
 }
 
-bool ReplicationState::reset_peers() {
-    std::shared_lock lock(node_mutex);
+bool RaftNodeManager::reset_peers() {
+    std::shared_lock lock(*node_mutex_ptr);
 
-    if(node) {
-        const Option<std::string> & refreshed_nodes_op = Config::fetch_nodes_config(config->get_nodes());
+    if(*node_ptr) {
+        const Option<std::string>& refreshed_nodes_op = Config::fetch_nodes_config(config->get_nodes());
         if(!refreshed_nodes_op.ok()) {
             LOG(WARNING) << "Error while fetching peer configuration: " << refreshed_nodes_op.error();
             return false;
         }
 
-        const std::string& nodes_config = ReplicationState::to_nodes_config(peering_endpoint,
-                                                                            Config::get_instance().get_api_port(),
-                                                                            refreshed_nodes_op.get());
+        const std::string& nodes_config = RaftConfigManager::to_nodes_config(
+            peering_endpoint,
+            config->get_api_port(),
+            refreshed_nodes_op.get()
+        );
 
         if(nodes_config.empty()) {
             LOG(WARNING) << "No nodes resolved from peer configuration.";
@@ -214,7 +248,7 @@ bool ReplicationState::reset_peers() {
         std::vector<braft::PeerId> peers;
         peer_config.list_peers(&peers);
 
-        auto status = node->reset_peers(peer_config);
+        auto status = (*node_ptr)->reset_peers(peer_config);
         LOG(INFO) << "Reset peers. Ok? " << status.ok() << ", status: " << status;
         LOG(INFO) << "New peer config is: " << peer_config;
         return status.ok();
@@ -223,25 +257,25 @@ bool ReplicationState::reset_peers() {
     return false;
 }
 
-int64_t ReplicationState::get_num_queued_writes() {
+int64_t RaftNodeManager::get_num_queued_writes() {
     return batched_indexer->get_queued_writes();
 }
 
-bool ReplicationState::is_leader() {
-    std::shared_lock lock(node_mutex);
+bool RaftNodeManager::is_leader() {
+    std::shared_lock lock(*node_mutex_ptr);
 
-    if(!node) {
+    if(!*node_ptr) {
         return false;
     }
 
-    return node->is_leader();
+    return (*node_ptr)->is_leader();
 }
 
-nlohmann::json ReplicationState::get_status() {
+nlohmann::json RaftNodeManager::get_status() {
     nlohmann::json status;
 
-    std::shared_lock lock(node_mutex);
-    if(!node) {
+    std::shared_lock lock(*node_mutex_ptr);
+    if(!*node_ptr) {
         // `node` is not yet initialized (probably loading snapshot)
         status["state"] = "NOT_READY";
         status["committed_index"] = 0;
@@ -250,7 +284,7 @@ nlohmann::json ReplicationState::get_status() {
     }
 
     braft::NodeStatus node_status;
-    node->get_status(&node_status);
+    (*node_ptr)->get_status(&node_status);
     lock.unlock();
 
     status["state"] = braft::state2str(node_status.state);
@@ -260,11 +294,31 @@ nlohmann::json ReplicationState::get_status() {
     return status;
 }
 
-void ReplicationState::persist_applying_index() {
-    std::shared_lock lock(node_mutex);
+std::string RaftNodeManager::get_leader_url() const {
+    std::shared_lock lock(*node_mutex_ptr);
 
-    if(node == nullptr) {
-        return ;
+    if(!*node_ptr) {
+        LOG(ERROR) << "Could not get leader url as node is not initialized!";
+        return "";
+    }
+
+    if((*node_ptr)->leader_id().is_empty()) {
+        LOG(ERROR) << "Could not get leader url, as node does not have a leader!";
+        return "";
+    }
+
+    const braft::PeerId& leader_addr = (*node_ptr)->leader_id();
+    lock.unlock();
+
+    const std::string protocol = api_uses_ssl ? "https" : "http";
+    return get_node_url_path(leader_addr, "/", protocol);
+}
+
+void RaftNodeManager::persist_applying_index() {
+    std::shared_lock lock(*node_mutex_ptr);
+
+    if(*node_ptr == nullptr) {
+        return;
     }
 
     lock.unlock();
@@ -272,73 +326,48 @@ void ReplicationState::persist_applying_index() {
     batched_indexer->persist_applying_index();
 }
 
-std::string ReplicationState::get_leader_url() const {
-    std::shared_lock lock(node_mutex);
-
-    if(!node) {
-        LOG(ERROR) << "Could not get leader url as node is not initialized!";
-        return "";
-    }
-
-    if(node->leader_id().is_empty()) {
-        LOG(ERROR) << "Could not get leader url, as node does not have a leader!";
-        return "";
-    }
-
-    const braft::PeerId& leader_addr = node->leader_id();
-    lock.unlock();
-
-    const std::string protocol = api_uses_ssl ? "https" : "http";
-    return get_node_url_path(leader_addr, "/", protocol);
+void RaftNodeManager::decr_pending_writes() {
+    (*pending_writes_ptr)--;
 }
 
-void ReplicationState::decr_pending_writes() {
-    pending_writes--;
-}
-
-void ReplicationState::do_snapshot(const std::string& snapshot_path, const std::shared_ptr<http_req>& req,
-                                   const std::shared_ptr<http_res>& res) {
-    if(node == nullptr) {
+void RaftNodeManager::do_snapshot(const std::string& snapshot_path, 
+                                 const std::shared_ptr<http_req>& req,
+                                 const std::shared_ptr<http_res>& res) {
+    if(*node_ptr == nullptr) {
         res->set_500("Could not trigger a snapshot, as node is not initialized.");
         auto req_res = new async_req_res_t(req, res, true);
-        get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-        return ;
+        message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
+        return;
     }
 
-    if(snapshot_in_progress) {
+    if(*snapshot_in_progress_ptr) {
         res->set_409("Another snapshot is in progress.");
         auto req_res = new async_req_res_t(req, res, true);
-        get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-        return ;
+        message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
+        return;
     }
 
     LOG(INFO) << "Triggering an on demand snapshot"
               << (!snapshot_path.empty() ? " with external snapshot path..." : "...");
 
     thread_pool->enqueue([&snapshot_path, req, res, this]() {
-        OnDemandSnapshotClosure* snapshot_closure = new OnDemandSnapshotClosure(this, req, res, snapshot_path,
-                                                                                raft_dir_path);
-        ext_snapshot_path = snapshot_path;
-        std::shared_lock lock(this->node_mutex);
-        node->snapshot(snapshot_closure);
+        OnDemandSnapshotClosure* snapshot_closure = new OnDemandSnapshotClosure(
+            replication_state, req, res, snapshot_path, raft_dir_path
+        );
+        *ext_snapshot_path_ptr = snapshot_path;
+        std::shared_lock lock(*node_mutex_ptr);
+        (*node_ptr)->snapshot(snapshot_closure);
     });
 }
 
-void ReplicationState::set_ext_snapshot_path(const std::string& snapshot_path) {
-    this->ext_snapshot_path = snapshot_path;
-}
-
-void ReplicationState::set_snapshot_in_progress(const bool snapshot_in_progress) {
-    this->snapshot_in_progress = snapshot_in_progress;
-}
-
-void ReplicationState::do_snapshot(const std::string& nodes) {
+void RaftNodeManager::do_snapshot(const std::string& nodes) {
     auto current_ts = std::time(nullptr);
-    if(current_ts - last_snapshot_ts < snapshot_interval_s) {
+    if(current_ts - *last_snapshot_ts_ptr < snapshot_interval_s) {
         return;
     }
 
-    LOG(INFO) << "Snapshot timer is active, current_ts: " << current_ts << ", last_snapshot_ts: " << last_snapshot_ts;
+    LOG(INFO) << "Snapshot timer is active, current_ts: " << current_ts 
+              << ", last_snapshot_ts: " << *last_snapshot_ts_ptr;
 
     if(is_leader()) {
         // run the snapshot only if there are no other recovering followers
@@ -347,8 +376,8 @@ void ReplicationState::do_snapshot(const std::string& nodes) {
         peer_config.parse_from(nodes);
         peer_config.list_peers(&peers);
 
-        std::shared_lock lock(node_mutex);
-        std::string my_addr = node->node_id().peer_id.to_string();
+        std::shared_lock lock(*node_mutex_ptr);
+        std::string my_addr = (*node_ptr)->node_id().peer_id.to_string();
         lock.unlock();
 
         bool all_peers_healthy = true;
@@ -378,85 +407,69 @@ void ReplicationState::do_snapshot(const std::string& nodes) {
 
         if(!all_peers_healthy) {
             LOG(WARNING) << "Unable to trigger snapshot as one or more of the peers reported unhealthy.";
-            return ;
+            return;
         }
     }
 
-    TimedSnapshotClosure* snapshot_closure = new TimedSnapshotClosure(this);
-    std::shared_lock lock(node_mutex);
-    node->snapshot(snapshot_closure);
-    last_snapshot_ts = current_ts;
+    TimedSnapshotClosure* snapshot_closure = new TimedSnapshotClosure(replication_state);
+    std::shared_lock lock(*node_mutex_ptr);
+    (*node_ptr)->snapshot(snapshot_closure);
+    *last_snapshot_ts_ptr = current_ts;
 }
 
-void TimedSnapshotClosure::Run() {
-    // Auto delete this after Done()
-    std::unique_ptr<TimedSnapshotClosure> self_guard(this);
+void RaftNodeManager::do_dummy_write() {
+    std::shared_lock lock(*node_mutex_ptr);
 
-    if(status().ok()) {
-        LOG(INFO) << "Timed snapshot succeeded!";
-    } else {
-        LOG(ERROR) << "Timed snapshot failed, error: " << status().error_str() << ", code: " << status().error_code();
+    if(!*node_ptr || (*node_ptr)->leader_id().is_empty()) {
+        LOG(ERROR) << "Could not do a dummy write, as node does not have a leader";
+        return;
     }
 
-    replication_state->set_snapshot_in_progress(false);
+    const std::string& leader_addr = (*node_ptr)->leader_id().to_string();
+    lock.unlock();
+
+    const std::string protocol = api_uses_ssl ? "https" : "http";
+    std::string url = get_node_url_path(leader_addr, "/health", protocol);
+
+    std::string api_res;
+    std::map<std::string, std::string> res_headers;
+    long status_code = HttpClient::post_response(url, "", api_res, res_headers, {}, 4000, true);
+
+    LOG(INFO) << "Dummy write to " << url << ", status = " << status_code << ", response = " << api_res;
 }
 
-void OnDemandSnapshotClosure::Run() {
-    // Auto delete this after Done()
-    std::unique_ptr<OnDemandSnapshotClosure> self_guard(this);
+void RaftNodeManager::set_ext_snapshot_path(const std::string& snapshot_path) {
+    *ext_snapshot_path_ptr = snapshot_path;
+}
 
-    bool ext_snapshot_succeeded = false;
+void RaftNodeManager::set_snapshot_in_progress(bool snapshot_in_progress) {
+    *snapshot_in_progress_ptr = snapshot_in_progress;
+}
 
-    // if an external snapshot is requested, copy latest snapshot directory into that
-    if(!ext_snapshot_path.empty()) {
-        const butil::FilePath& dest_state_dir = butil::FilePath(ext_snapshot_path + "/state");
+std::string RaftNodeManager::get_node_url_path(const braft::PeerId& peer_id, 
+                                              const std::string& path,
+                                              const std::string& protocol) const {
+    const std::string endpoint_str = butil::endpoint2str(peer_id.addr).c_str();
+    const size_t last_colon = endpoint_str.rfind(':');
+    if (last_colon == std::string::npos) {
+        LOG(ERROR) << "Invalid endpoint format: " << endpoint_str;
+        return "";
+    }
 
-        if(!butil::DirectoryExists(dest_state_dir)) {
-            butil::CreateDirectory(dest_state_dir, true);
+    const std::string ip_part = endpoint_str.substr(0, last_colon);
+
+    std::string url = protocol + "://";
+    url += ip_part;
+    url += ":";
+    url += std::to_string(peer_id.idx);
+
+    if(!path.empty()) {
+        if(path[0] == '/') {
+            url += path;
+        } else {
+            url += "/" + path;
         }
-
-        const butil::FilePath& src_snapshot_dir = butil::FilePath(state_dir_path + "/snapshot");
-        const butil::FilePath& src_meta_dir = butil::FilePath(state_dir_path + "/meta");
-
-        bool snapshot_copied = butil::CopyDirectory(src_snapshot_dir, dest_state_dir, true);
-        bool meta_copied = butil::CopyDirectory(src_meta_dir, dest_state_dir, true);
-
-        ext_snapshot_succeeded = snapshot_copied && meta_copied;
     }
 
-    // order is important, because the atomic boolean guards write to the path
-    replication_state->set_ext_snapshot_path("");
-    replication_state->set_snapshot_in_progress(false);
-
-    req->last_chunk_aggregate = true;
-    res->final = true;
-
-    nlohmann::json response;
-    uint32_t status_code;
-
-    if(!status().ok()) {
-        // in case of internal raft error
-        LOG(ERROR) << "On demand snapshot failed, error: " << status().error_str() << ", code: " << status().error_code();
-        status_code = 500;
-        response["success"] = false;
-        response["error"] = status().error_str();
-    } else if(!ext_snapshot_succeeded && !ext_snapshot_path.empty()) {
-        LOG(ERROR) << "On demand snapshot failed, error: copy failed.";
-        status_code = 500;
-        response["success"] = false;
-        response["error"] = "Copy failed.";
-    } else {
-        LOG(INFO) << "On demand snapshot succeeded!";
-        status_code = 201;
-        response["success"] = true;
-    }
-
-    res->status_code = status_code;
-    res->body = response.dump();
-
-    auto req_res = new async_req_res_t(req, res, true);
-    replication_state->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-
-    // wait for response to be sent
-    res->wait();
+    return url;
 }

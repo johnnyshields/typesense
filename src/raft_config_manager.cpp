@@ -1,15 +1,13 @@
-#include "store.h"
-#include "raft_server.h"
+#include "raft_config_manager.h"
 #include <string_utils.h>
 #include <logger.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <cstring>
+#include <vector>
 
-// DNS and Configuration Management Module
-// Extracted from raft_server.cpp for better organization
-
-std::string ReplicationState::hostname2ipstr(const std::string& hostname) {
+std::string RaftConfigManager::hostname2ipstr(const std::string& hostname) {
     if(hostname.size() > 64) {
         LOG(ERROR) << "Host name is too long (must be < 64 characters): " << hostname;
         return "";
@@ -56,7 +54,7 @@ std::string ReplicationState::hostname2ipstr(const std::string& hostname) {
     return resolved_ip;
 }
 
-std::string ReplicationState::resolve_node_hosts(const std::string& nodes_config) {
+std::string RaftConfigManager::resolve_node_hosts(const std::string& nodes_config) {
     std::vector<std::string> final_nodes_vec;
     std::vector<std::string> node_strings;
     StringUtils::split(nodes_config, node_strings, ",");
@@ -94,9 +92,9 @@ std::string ReplicationState::resolve_node_hosts(const std::string& nodes_config
     return final_nodes_config;
 }
 
-// can return empty string if DNS resolution fails on all nodes
-std::string ReplicationState::to_nodes_config(const butil::EndPoint& peering_endpoint, const int api_port,
-                                              const std::string& nodes_config) {
+std::string RaftConfigManager::to_nodes_config(const butil::EndPoint& peering_endpoint, 
+                                               const int api_port,
+                                               const std::string& nodes_config) {
     if(nodes_config.empty()) {
         // endpoint2str gives us "<ip>:<peering_port>", we just need to add ":<api_port>"
         return std::string(butil::endpoint2str(peering_endpoint).c_str()) + ":" + std::to_string(api_port);

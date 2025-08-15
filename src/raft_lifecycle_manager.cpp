@@ -1,5 +1,6 @@
-#include "store.h"
 #include "raft_server.h"
+#include "raft_config_manager.h"
+#include "store.h"
 #include <butil/files/file_enumerator.h>
 #include <butil/endpoint.h>
 #include <braft/raft.h>
@@ -12,9 +13,11 @@
 #include "thread_local_vars.h"
 #include "core_api.h"
 #include "personalization_model_manager.h"
+#include "config.h"
+#include <logger.h>
 
 // Raft Lifecycle and Snapshot Management Module
-// Extracted from raft_server.cpp for better organization
+// This remains as an implementation file for ReplicationState methods
 
 namespace braft {
     DECLARE_int32(raft_do_snapshot_min_index_gap);
@@ -278,7 +281,7 @@ int ReplicationState::on_snapshot_load(braft::SnapshotReader* reader) {
     if(analytics_store && directory_exists(analytics_snapshot_path)) {
         // analytics db snapshot could be missing (older version or disabled earlier)
         int reload_store = analytics_store->reload(true, analytics_snapshot_path,
-                                                   Config::get_instance().get_analytics_db_ttl());
+                                                   config->get_analytics_db_ttl());
         if (reload_store != 0) {
             LOG(ERROR) << "Failed to reload analytics db snapshot.";
             return reload_store;
@@ -330,49 +333,76 @@ void ReplicationState::on_apply(braft::Iterator& iter) {
     }
 }
 
-void ReplicationState::shutdown() {
-    LOG(INFO) << "Set shutting_down = true";
-    shutting_down = true;
+// Snapshot closure implementations
+void TimedSnapshotClosure::Run() {
+    // Auto delete this after Done()
+    std::unique_ptr<TimedSnapshotClosure> self_guard(this);
 
-    // wait for pending writes to drop to zero
-    LOG(INFO) << "Waiting for in-flight writes to finish...";
-    while(pending_writes.load() != 0) {
-        LOG(INFO) << "pending_writes: " << pending_writes;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    if(status().ok()) {
+        LOG(INFO) << "Timed snapshot succeeded!";
+    } else {
+        LOG(ERROR) << "Timed snapshot failed, error: " << status().error_str() << ", code: " << status().error_code();
     }
 
-    LOG(INFO) << "Replication state shutdown, store sequence: " << store->get_latest_seq_number();
-    std::unique_lock lock(node_mutex);
-
-    if (node) {
-        LOG(INFO) << "node->shutdown";
-        node->shutdown(nullptr);
-
-        // Blocking this thread until the node is eventually down.
-        LOG(INFO) << "node->join";
-        node->join();
-        delete node;
-        node = nullptr;
-    }
+    replication_state->set_snapshot_in_progress(false);
 }
 
-void ReplicationState::do_dummy_write() {
-    std::shared_lock lock(node_mutex);
+void OnDemandSnapshotClosure::Run() {
+    // Auto delete this after Done()
+    std::unique_ptr<OnDemandSnapshotClosure> self_guard(this);
 
-    if(!node || node->leader_id().is_empty()) {
-        LOG(ERROR) << "Could not do a dummy write, as node does not have a leader";
-        return ;
+    bool ext_snapshot_succeeded = false;
+
+    // if an external snapshot is requested, copy latest snapshot directory into that
+    if(!ext_snapshot_path.empty()) {
+        const butil::FilePath& dest_state_dir = butil::FilePath(ext_snapshot_path + "/state");
+
+        if(!butil::DirectoryExists(dest_state_dir)) {
+            butil::CreateDirectory(dest_state_dir, true);
+        }
+
+        const butil::FilePath& src_snapshot_dir = butil::FilePath(state_dir_path + "/snapshot");
+        const butil::FilePath& src_meta_dir = butil::FilePath(state_dir_path + "/meta");
+
+        bool snapshot_copied = butil::CopyDirectory(src_snapshot_dir, dest_state_dir, true);
+        bool meta_copied = butil::CopyDirectory(src_meta_dir, dest_state_dir, true);
+
+        ext_snapshot_succeeded = snapshot_copied && meta_copied;
     }
 
-    const std::string & leader_addr = node->leader_id().to_string();
-    lock.unlock();
+    // order is important, because the atomic boolean guards write to the path
+    replication_state->set_ext_snapshot_path("");
+    replication_state->set_snapshot_in_progress(false);
 
-    const std::string protocol = api_uses_ssl ? "https" : "http";
-    std::string url = get_node_url_path(leader_addr, "/health", protocol);
+    req->last_chunk_aggregate = true;
+    res->final = true;
 
-    std::string api_res;
-    std::map<std::string, std::string> res_headers;
-    long status_code = HttpClient::post_response(url, "", api_res, res_headers, {}, 4000, true);
+    nlohmann::json response;
+    uint32_t status_code;
 
-    LOG(INFO) << "Dummy write to " << url << ", status = " << status_code << ", response = " << api_res;
+    if(!status().ok()) {
+        // in case of internal raft error
+        LOG(ERROR) << "On demand snapshot failed, error: " << status().error_str() << ", code: " << status().error_code();
+        status_code = 500;
+        response["success"] = false;
+        response["error"] = status().error_str();
+    } else if(!ext_snapshot_succeeded && !ext_snapshot_path.empty()) {
+        LOG(ERROR) << "On demand snapshot failed, error: copy failed.";
+        status_code = 500;
+        response["success"] = false;
+        response["error"] = "Copy failed.";
+    } else {
+        LOG(INFO) << "On demand snapshot succeeded!";
+        status_code = 201;
+        response["success"] = true;
+    }
+
+    res->status_code = status_code;
+    res->body = response.dump();
+
+    auto req_res = new async_req_res_t(req, res, true);
+    replication_state->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
+
+    // wait for response to be sent
+    res->wait();
 }

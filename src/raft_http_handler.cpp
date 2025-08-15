@@ -1,15 +1,37 @@
-#include "store.h"
+#include "raft_http_handler.h"
 #include "raft_server.h"
+#include "store.h"
 #include <string_utils.h>
 #include <http_client.h>
 #include <collection_manager.h>
 #include "core_api.h"
+#include "cached_resource_stat.h"
 #include <zlib.h>
+#include <logger.h>
 
-// HTTP Request Processing Module
-// Extracted from raft_server.cpp for better organization
+RaftHttpHandler::RaftHttpHandler(ReplicationState* state, 
+                                 HttpServer* server, 
+                                 Store* store,
+                                 BatchedIndexer* batched_indexer,
+                                 ThreadPool* thread_pool, 
+                                 http_message_dispatcher* dispatcher,
+                                 const Config* config, 
+                                 bool api_uses_ssl,
+                                 const std::string& raft_dir_path,
+                                 std::shared_mutex* node_mutex,
+                                 braft::Node* volatile* node,
+                                 std::atomic<bool>* shutting_down,
+                                 std::atomic<size_t>* pending_writes,
+                                 butil::atomic<int64_t>* leader_term)
+    : replication_state(state), server(server), store(store), 
+      batched_indexer(batched_indexer), thread_pool(thread_pool), 
+      message_dispatcher(dispatcher), config(config), 
+      api_uses_ssl(api_uses_ssl), raft_dir_path(raft_dir_path),
+      node_mutex_ptr(node_mutex), node_ptr(node),
+      shutting_down_ptr(shutting_down), pending_writes_ptr(pending_writes),
+      leader_term_ptr(leader_term) {}
 
-Option<bool> ReplicationState::handle_gzip(const std::shared_ptr<http_req>& request) {
+Option<bool> RaftHttpHandler::handle_gzip(const std::shared_ptr<http_req>& request) {
     if (!request->zstream_initialized) {
         request->zs.zalloc = Z_NULL;
         request->zs.zfree = Z_NULL;
@@ -57,18 +79,28 @@ Option<bool> ReplicationState::handle_gzip(const std::shared_ptr<http_req>& requ
     return Option<bool>(true);
 }
 
-void ReplicationState::write(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response) {
-    if(shutting_down) {
+bool RaftHttpHandler::get_alter_in_progress(const std::string& collection_name) {
+    // This would need to be implemented based on your collection manager
+    // For now, returning false as placeholder
+    return false;
+}
+
+void RaftHttpHandler::write(const std::shared_ptr<http_req>& request, 
+                           const std::shared_ptr<http_res>& response) {
+    if(*shutting_down_ptr) {
         response->set_503("Shutting down.");
         response->final = true;
         response->is_alive = false;
         request->notify();
-        return ;
+        return;
     }
 
     // reject write if disk space is running out
-    auto resource_check = cached_resource_stat_t::get_instance().has_enough_resources(raft_dir_path,
-                                  config->get_disk_used_max_percentage(), config->get_memory_used_max_percentage());
+    auto resource_check = cached_resource_stat_t::get_instance().has_enough_resources(
+        raft_dir_path,
+        config->get_disk_used_max_percentage(), 
+        config->get_memory_used_max_percentage()
+    );
 
     if (resource_check != cached_resource_stat_t::OK && request->do_resource_check()) {
         response->set_422("Rejecting write: running out of resource type: " +
@@ -97,17 +129,17 @@ void ReplicationState::write(const std::shared_ptr<http_req>& request, const std
         }
     }
 
-    std::shared_lock lock(node_mutex);
+    std::shared_lock lock(*node_mutex_ptr);
 
-    if(!node) {
-        return ;
+    if(!*node_ptr) {
+        return;
     }
 
-    if (!node->is_leader()) {
+    if (!(*node_ptr)->is_leader()) {
         return write_to_leader(request, response);
     }
 
-    //check if it's first gzip chunk or is gzip stream initialized
+    // Check if it's first gzip chunk or is gzip stream initialized
     if(((request->body.size() > 2) &&
         (31 == (int)request->body[0] && -117 == (int)request->body[1])) || request->zstream_initialized) {
         auto res = handle_gzip(request);
@@ -133,17 +165,18 @@ void ReplicationState::write(const std::shared_ptr<http_req>& request, const std
     task.done = new ReplicationClosure(request, response);
 
     // To avoid ABA problem
-    task.expected_term = leader_term.load(butil::memory_order_relaxed);
+    task.expected_term = leader_term_ptr->load(butil::memory_order_relaxed);
 
     // Now the task is applied to the group
-    node->apply(task);
+    (*node_ptr)->apply(task);
 
-    pending_writes++;
+    (*pending_writes_ptr)++;
 }
 
-void ReplicationState::write_to_leader(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response) {
+void RaftHttpHandler::write_to_leader(const std::shared_ptr<http_req>& request, 
+                                     const std::shared_ptr<http_res>& response) {
     // no lock on `node` needed as caller uses the lock
-    if(!node || node->leader_id().is_empty()) {
+    if(!*node_ptr || (*node_ptr)->leader_id().is_empty()) {
         // Handle no leader scenario
         LOG(ERROR) << "Rejecting write: could not find a leader.";
 
@@ -152,7 +185,7 @@ void ReplicationState::write_to_leader(const std::shared_ptr<http_req>& request,
             LOG(ERROR) << "Terminating streaming request gracefully.";
             response->is_alive = false;
             request->notify();
-            return ;
+            return;
         }
 
         response->set_500("Could not find a leader.");
@@ -163,21 +196,21 @@ void ReplicationState::write_to_leader(const std::shared_ptr<http_req>& request,
     if (response->proxied_stream) {
         // indicates async request body of in-flight request
         request->notify();
-        return ;
+        return;
     }
 
-    const braft::PeerId& leader_addr = node->leader_id();
+    const braft::PeerId& leader_addr = (*node_ptr)->leader_id();
 
     h2o_custom_generator_t* custom_generator = reinterpret_cast<h2o_custom_generator_t *>(response->generator.load());
-    HttpServer* server = custom_generator->h2o_handler->http_server;
+    HttpServer* http_server = custom_generator->h2o_handler->http_server;
 
     auto raw_req = request->_req;
     const std::string& path = std::string(raw_req->path.base, raw_req->path.len);
     const std::string& scheme = std::string(raw_req->scheme->name.base, raw_req->scheme->name.len);
     const std::string url = get_node_url_path(leader_addr, path, scheme);
 
-    thread_pool->enqueue([request, response, server, path, url, this]() {
-        pending_writes++;
+    thread_pool->enqueue([request, response, http_server, path, url, this]() {
+        (*pending_writes_ptr)++;
 
         std::map<std::string, std::string> res_headers;
 
@@ -188,13 +221,13 @@ void ReplicationState::write_to_leader(const std::shared_ptr<http_req>& request,
             if(path_parts.back().rfind("import", 0) == 0) {
                 // imports are handled asynchronously
                 response->proxied_stream = true;
-                long status = HttpClient::post_response_async(url, request, response, server, true);
+                long status = HttpClient::post_response_async(url, request, response, http_server, true);
 
                 if(status == 500) {
                     response->content_type_header = res_headers["content-type"];
                     response->set_500("");
                 } else {
-                    return ;
+                    return;
                 }
             } else {
                 std::string api_res;
@@ -226,12 +259,13 @@ void ReplicationState::write_to_leader(const std::shared_ptr<http_req>& request,
 
         auto req_res = new async_req_res_t(request, response, true);
         message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-        pending_writes--;
+        (*pending_writes_ptr)--;
     });
 }
 
-std::string ReplicationState::get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
-                                                const std::string& protocol) const {
+std::string RaftHttpHandler::get_node_url_path(const braft::PeerId& peer_id, 
+                                              const std::string& path,
+                                              const std::string& protocol) const {
     const std::string endpoint_str = butil::endpoint2str(peer_id.addr).c_str();
     const size_t last_colon = endpoint_str.rfind(':');
     if (last_colon == std::string::npos) {
@@ -259,8 +293,8 @@ std::string ReplicationState::get_node_url_path(const braft::PeerId& peer_id, co
     return url;
 }
 
-void ReplicationState::read(const std::shared_ptr<http_res>& response) {
+void RaftHttpHandler::read(const std::shared_ptr<http_res>& response) {
     // NOT USED:
     // For consistency, reads to followers could be rejected.
-    // Currently, we don't do implement reads via raft.
+    // Currently, we don't implement reads via raft.
 }
