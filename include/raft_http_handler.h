@@ -32,15 +32,6 @@ private:
     bool api_uses_ssl;
     std::string raft_dir_path;
 
-    // Node access synchronization
-    mutable std::shared_mutex* node_mutex_ptr;
-    braft::Node* volatile* node_ptr;
-
-    // State flags
-    std::atomic<bool>* shutting_down_ptr;
-    std::atomic<size_t>* pending_writes_ptr;
-    butil::atomic<int64_t>* leader_term_ptr;
-
 public:
     /**
      * Constructor for RaftHttpHandler
@@ -53,12 +44,7 @@ public:
                    http_message_dispatcher* dispatcher,
                    const Config* config, 
                    bool api_uses_ssl,
-                   const std::string& raft_dir_path,
-                   std::shared_mutex* node_mutex,
-                   braft::Node* volatile* node,
-                   std::atomic<bool>* shutting_down,
-                   std::atomic<size_t>* pending_writes,
-                   butil::atomic<int64_t>* leader_term);
+                   const std::string& raft_dir_path);
 
     /**
      * Handle gzip compression for incoming requests

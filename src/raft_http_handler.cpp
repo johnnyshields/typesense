@@ -17,19 +17,11 @@ RaftHttpHandler::RaftHttpHandler(ReplicationState* state,
                                  http_message_dispatcher* dispatcher,
                                  const Config* config, 
                                  bool api_uses_ssl,
-                                 const std::string& raft_dir_path,
-                                 std::shared_mutex* node_mutex,
-                                 braft::Node* volatile* node,
-                                 std::atomic<bool>* shutting_down,
-                                 std::atomic<size_t>* pending_writes,
-                                 butil::atomic<int64_t>* leader_term)
+                                 const std::string& raft_dir_path)
     : replication_state(state), server(server), store(store), 
       batched_indexer(batched_indexer), thread_pool(thread_pool), 
       message_dispatcher(dispatcher), config(config), 
-      api_uses_ssl(api_uses_ssl), raft_dir_path(raft_dir_path),
-      node_mutex_ptr(node_mutex), node_ptr(node),
-      shutting_down_ptr(shutting_down), pending_writes_ptr(pending_writes),
-      leader_term_ptr(leader_term) {}
+      api_uses_ssl(api_uses_ssl), raft_dir_path(raft_dir_path) {}
 
 Option<bool> RaftHttpHandler::handle_gzip(const std::shared_ptr<http_req>& request) {
     if (!request->zstream_initialized) {
@@ -87,7 +79,7 @@ bool RaftHttpHandler::get_alter_in_progress(const std::string& collection_name) 
 
 void RaftHttpHandler::write(const std::shared_ptr<http_req>& request, 
                            const std::shared_ptr<http_res>& response) {
-    if(*shutting_down_ptr) {
+    if(replication_state->is_shutting_down()) {
         response->set_503("Shutting down.");
         response->final = true;
         response->is_alive = false;
@@ -129,13 +121,14 @@ void RaftHttpHandler::write(const std::shared_ptr<http_req>& request,
         }
     }
 
-    std::shared_lock lock(*node_mutex_ptr);
+    std::shared_lock lock(replication_state->get_node_mutex());
 
-    if(!*node_ptr) {
+    braft::Node* node = replication_state->get_node();
+    if(!node) {
         return;
     }
 
-    if (!(*node_ptr)->is_leader()) {
+    if (!node->is_leader()) {
         return write_to_leader(request, response);
     }
 
@@ -165,18 +158,19 @@ void RaftHttpHandler::write(const std::shared_ptr<http_req>& request,
     task.done = new ReplicationClosure(request, response);
 
     // To avoid ABA problem
-    task.expected_term = leader_term_ptr->load(butil::memory_order_relaxed);
+    task.expected_term = replication_state->get_leader_term();
 
     // Now the task is applied to the group
-    (*node_ptr)->apply(task);
+    node->apply(task);
 
-    (*pending_writes_ptr)++;
+    replication_state->incr_pending_writes();
 }
 
 void RaftHttpHandler::write_to_leader(const std::shared_ptr<http_req>& request, 
                                      const std::shared_ptr<http_res>& response) {
     // no lock on `node` needed as caller uses the lock
-    if(!*node_ptr || (*node_ptr)->leader_id().is_empty()) {
+    braft::Node* node = replication_state->get_node();
+    if(!node || node->leader_id().is_empty()) {
         // Handle no leader scenario
         LOG(ERROR) << "Rejecting write: could not find a leader.";
 
@@ -199,7 +193,7 @@ void RaftHttpHandler::write_to_leader(const std::shared_ptr<http_req>& request,
         return;
     }
 
-    const braft::PeerId& leader_addr = (*node_ptr)->leader_id();
+    const braft::PeerId& leader_addr = node->leader_id();
 
     h2o_custom_generator_t* custom_generator = reinterpret_cast<h2o_custom_generator_t *>(response->generator.load());
     HttpServer* http_server = custom_generator->h2o_handler->http_server;
@@ -210,7 +204,7 @@ void RaftHttpHandler::write_to_leader(const std::shared_ptr<http_req>& request,
     const std::string url = get_node_url_path(leader_addr, path, scheme);
 
     thread_pool->enqueue([request, response, http_server, path, url, this]() {
-        (*pending_writes_ptr)++;
+        replication_state->incr_pending_writes();
 
         std::map<std::string, std::string> res_headers;
 
@@ -259,7 +253,7 @@ void RaftHttpHandler::write_to_leader(const std::shared_ptr<http_req>& request,
 
         auto req_res = new async_req_res_t(request, response, true);
         message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
-        (*pending_writes_ptr)--;
+        replication_state->decr_pending_writes();
     });
 }
 

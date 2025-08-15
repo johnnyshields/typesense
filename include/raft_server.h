@@ -166,6 +166,29 @@ public:
                      bool api_uses_ssl, const Config* config,
                      size_t num_collections_parallel_load, size_t num_documents_parallel_load);
 
+    // Accessor methods for manager classes
+    braft::Node* get_node() { return node; }
+    const braft::Node* get_node() const { return node; }
+    std::shared_mutex& get_node_mutex() { return node_mutex; }
+    const std::shared_mutex& get_node_mutex() const { return node_mutex; }
+
+    butil::atomic<int64_t>& get_leader_term() { return leader_term; }
+    std::atomic<bool>& get_shutting_down() { return shutting_down; }
+    std::atomic<size_t>& get_pending_writes() { return pending_writes; }
+    std::atomic<bool>& get_snapshot_in_progress() { return snapshot_in_progress; }
+
+    std::atomic<bool>& get_read_caught_up() { return read_caught_up; }
+    std::atomic<bool>& get_write_caught_up() { return write_caught_up; }
+
+    uint64_t& get_last_snapshot_ts() { return last_snapshot_ts; }
+    std::string& get_ext_snapshot_path() { return ext_snapshot_path; }
+
+    const std::string& get_raft_dir_path() const { return raft_dir_path; }
+    const butil::EndPoint& get_peering_endpoint() const { return peering_endpoint; }
+    int get_election_timeout_interval_ms() const { return election_timeout_interval_ms; }
+    uint64_t get_snapshot_interval_s() const { return snapshot_interval_s; }
+    bool get_api_uses_ssl() const { return api_uses_ssl; }
+
     // Starts this node
     int start(const butil::EndPoint & peering_endpoint, int api_port,
               int election_timeout_ms, int snapshot_max_byte_count_per_rpc,
@@ -211,6 +234,10 @@ public:
     int init_db();
 
     Store* get_store();
+    HttpServer* get_server() { return server; }
+    BatchedIndexer* get_batched_indexer() { return batched_indexer; }
+    const Config* get_config() const { return config; }
+    ThreadPool* get_thread_pool() { return thread_pool; }
 
     // For manual / external snapshots
     void do_snapshot(const std::string& snapshot_path, 

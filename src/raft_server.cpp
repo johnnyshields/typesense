@@ -74,19 +74,8 @@ int ReplicationState::start(const butil::EndPoint & peering_endpoint, const int 
     this->write_caught_up = false;
 
     // Initialize manager classes now that we have all required parameters
-    http_handler = std::make_unique<RaftHttpHandler>(
-        this, server, store, batched_indexer, thread_pool, message_dispatcher,
-        config, api_uses_ssl, raft_dir_path,
-        &node_mutex, &node, &shutting_down, &pending_writes, &leader_term
-    );
-
-    node_manager = std::make_unique<RaftNodeManager>(
-        this, config, store, batched_indexer, thread_pool, message_dispatcher,
-        api_uses_ssl, raft_dir_path, peering_endpoint, election_timeout_interval_ms,
-        snapshot_interval_s, &node_mutex, &node,
-        &read_caught_up, &write_caught_up, &pending_writes, &snapshot_in_progress,
-        &last_snapshot_ts, &ext_snapshot_path
-    );
+    http_handler = std::make_unique<RaftHttpHandler>(this);
+    node_manager = std::make_unique<RaftNodeManager>(this);
 
     // Configure braft flags
     braft::FLAGS_raft_do_snapshot_min_index_gap = 1;
