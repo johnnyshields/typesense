@@ -1,4 +1,4 @@
-#include "raft_config_manager.h"
+#include "raft_config.h"
 #include <string_utils.h>
 #include <logger.h>
 #include <sys/socket.h>
@@ -6,8 +6,11 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <vector>
+#include <braft/raft.h>
 
-std::string RaftConfigManager::hostname2ipstr(const std::string& hostname) {
+namespace raft_config {
+
+std::string hostname2ipstr(const std::string& hostname) {
     if(hostname.size() > 64) {
         LOG(ERROR) << "Host name is too long (must be < 64 characters): " << hostname;
         return "";
@@ -54,7 +57,7 @@ std::string RaftConfigManager::hostname2ipstr(const std::string& hostname) {
     return resolved_ip;
 }
 
-std::string RaftConfigManager::resolve_node_hosts(const std::string& nodes_config) {
+std::string resolve_node_hosts(const std::string& nodes_config) {
     std::vector<std::string> final_nodes_vec;
     std::vector<std::string> node_strings;
     StringUtils::split(nodes_config, node_strings, ",");
@@ -92,9 +95,9 @@ std::string RaftConfigManager::resolve_node_hosts(const std::string& nodes_confi
     return final_nodes_config;
 }
 
-std::string RaftConfigManager::to_nodes_config(const butil::EndPoint& peering_endpoint, 
-                                               const int api_port,
-                                               const std::string& nodes_config) {
+std::string to_nodes_config(const butil::EndPoint& peering_endpoint, 
+                            const int api_port,
+                            const std::string& nodes_config) {
     if(nodes_config.empty()) {
         // endpoint2str gives us "<ip>:<peering_port>", we just need to add ":<api_port>"
         return std::string(butil::endpoint2str(peering_endpoint).c_str()) + ":" + std::to_string(api_port);
@@ -102,3 +105,36 @@ std::string RaftConfigManager::to_nodes_config(const butil::EndPoint& peering_en
         return resolve_node_hosts(nodes_config);
     }
 }
+
+std::string get_node_url_path(const braft::PeerId& peer_id,
+                              const std::string& path,
+                              const std::string& protocol) {
+    const std::string endpoint_str = butil::endpoint2str(peer_id.addr).c_str();
+    const size_t last_colon = endpoint_str.rfind(':');
+    if (last_colon == std::string::npos) {
+        LOG(ERROR) << "Invalid endpoint format: " << endpoint_str;
+        return "";
+    }
+
+    // For IPv6, the IP part may contain colons and be wrapped in []
+    const std::string ip_part = endpoint_str.substr(0, last_colon);
+
+    std::string url = protocol + "://";
+    url += ip_part;  // IP part (possibly with [] for IPv6)
+    url += ":";
+    url += std::to_string(peer_id.idx);
+
+    // Add path ensuring there's exactly one / between URL parts
+    if(!path.empty()) {
+        if(path[0] == '/') {
+            url += path;
+        } else {
+            url += "/" + path;
+        }
+    }
+
+    return url;
+}
+
+}
+

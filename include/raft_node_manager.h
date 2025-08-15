@@ -6,124 +6,189 @@
 #include <shared_mutex>
 #include <nlohmann/json.hpp>
 #include <braft/raft.h>
-#include "http_data.h"
+#include <butil/endpoint.h>
 
-class ReplicationState;
 class Config;
 class Store;
 class BatchedIndexer;
-class HttpServer;
-class ThreadPool;
-class http_message_dispatcher;
 
 /**
- * RaftNodeManager handles Raft node operations, status monitoring,
- * and snapshot management for the cluster.
+ * RaftNodeManager owns and manages the braft::Node instance.
+ * It encapsulates all node operations and provides a clean interface
+ * for node management, making it easier to test and mock.
  */
 class RaftNodeManager {
 private:
-    ReplicationState* replication_state;
+    // Node ownership
+    braft::Node* volatile node;
+    mutable std::shared_mutex node_mutex;
+    
+    // Dependencies (not owned)
+    const Config* config;
+    Store* store;
+    BatchedIndexer* batched_indexer;
+    
+    // Node configuration
+    butil::EndPoint peering_endpoint;
+    int api_port;
+    int election_timeout_ms;
+    bool api_uses_ssl;
+    
+    // Leader tracking
+    butil::atomic<int64_t> leader_term;
+    
+    // Health status
+    std::atomic<bool> read_caught_up;
+    std::atomic<bool> write_caught_up;
 
 public:
     /**
-     * Constructor for RaftNodeManager
+     * Constructor
      */
-    explicit RaftNodeManager(ReplicationState* state);
+    RaftNodeManager(const Config* config, 
+                   Store* store,
+                   BatchedIndexer* batched_indexer,
+                   bool api_uses_ssl);
     
     /**
-     * Refresh cluster node configuration
+     * Destructor - ensures proper node cleanup
      */
-    void refresh_nodes(const std::string& nodes, 
-                      size_t raft_counter,
-                      const std::atomic<bool>& reset_peers_on_error);
+    ~RaftNodeManager();
     
     /**
-     * Update catchup status for reads and writes
+     * Initialize and start the Raft node
+     * @param fsm The state machine to attach to the node
+     * @param peering_endpoint The endpoint for this node
+     * @param api_port The API port for this node
+     * @param election_timeout_ms Election timeout in milliseconds
+     * @param raft_dir Directory for Raft data
+     * @param nodes Initial cluster configuration
+     * @return 0 on success, error code on failure
      */
-    void refresh_catchup_status(bool log_msg);
+    int init_node(braft::StateMachine* fsm,
+                  const butil::EndPoint& peering_endpoint,
+                  int api_port,
+                  int election_timeout_ms,
+                  const std::string& raft_dir,
+                  const std::string& nodes);
     
     /**
-     * Check if node is alive and caught up for reads
+     * Wait for the node to become ready (leader or follower with leader)
+     * @param timeout_ms Maximum time to wait in milliseconds
+     * @param quit_signal External signal to abort waiting
+     * @return true if ready, false if timeout or quit
      */
-    bool is_alive() const;
+    bool wait_until_ready(int timeout_ms, const std::atomic<bool>& quit_signal);
     
     /**
-     * Get current node state
+     * Shutdown the node gracefully
      */
-    uint64_t node_state() const;
+    void shutdown();
     
     /**
-     * Trigger a leader election vote
+     * Apply a task to the Raft log
+     * @param task The task to apply
      */
-    bool trigger_vote();
+    void apply(braft::Task& task);
     
     /**
-     * Reset peer configuration (unsafe operation)
+     * Trigger a snapshot
+     * @param done Closure to call when snapshot completes
      */
-    bool reset_peers();
+    void snapshot(braft::Closure* done);
     
     /**
-     * Get number of queued write operations
+     * Change cluster peers configuration
+     * @param new_conf New configuration
+     * @param done Closure to call when complete
      */
-    int64_t get_num_queued_writes();
+    void change_peers(const braft::Configuration& new_conf, braft::Closure* done);
+    
+    /**
+     * Reset peers (unsafe - only for single node recovery)
+     * @param new_conf New configuration
+     * @return Status of the operation
+     */
+    butil::Status reset_peers(const braft::Configuration& new_conf);
+    
+    /**
+     * Trigger an election
+     * @return Status of the operation
+     */
+    butil::Status trigger_vote();
+    
+    /**
+     * Get current node status
+     * @param status Output parameter for status
+     */
+    void get_status(braft::NodeStatus* status) const;
     
     /**
      * Check if this node is the leader
      */
-    bool is_leader();
+    bool is_leader() const;
     
     /**
-     * Get node status as JSON
+     * Get the leader's peer ID
      */
-    nlohmann::json get_status();
+    braft::PeerId leader_id() const;
     
     /**
-     * Get leader's URL
+     * Get node ID
+     */
+    braft::NodeId node_id() const;
+    
+    /**
+     * Check if node is ready to serve reads
+     */
+    bool is_read_ready() const { return read_caught_up; }
+    
+    /**
+     * Check if node is ready to serve writes
+     */
+    bool is_write_ready() const { return write_caught_up; }
+    
+    /**
+     * Update catchup status based on current state
+     * @param log_msg Whether to log status messages
+     */
+    void refresh_catchup_status(bool log_msg);
+    
+    /**
+     * Get current leader term
+     */
+    int64_t get_leader_term() const { 
+        return leader_term.load(butil::memory_order_acquire); 
+    }
+    
+    /**
+     * Set leader term (called by state machine)
+     */
+    void set_leader_term(int64_t term) { 
+        leader_term.store(term, butil::memory_order_release); 
+    }
+    
+    /**
+     * Get JSON status for monitoring
+     */
+    nlohmann::json get_status() const;
+    
+    /**
+     * Get URL for the current leader
      */
     std::string get_leader_url() const;
     
     /**
-     * Persist the current applying index
+     * Refresh node membership
+     * @param nodes New nodes configuration
+     * @param allow_single_node_reset Allow reset for single node
      */
-    void persist_applying_index();
-    
-    /**
-     * Decrement pending writes counter
-     */
-    void decr_pending_writes();
-    
-    /**
-     * Trigger on-demand snapshot with optional external path
-     */
-    void do_snapshot(const std::string& snapshot_path, 
-                    const std::shared_ptr<http_req>& req,
-                    const std::shared_ptr<http_res>& res);
-    
-    /**
-     * Trigger timed snapshot if conditions are met
-     */
-    void do_snapshot(const std::string& nodes);
-    
-    /**
-     * Perform a dummy write operation
-     */
-    void do_dummy_write();
-    
-    /**
-     * Set external snapshot path
-     */
-    void set_ext_snapshot_path(const std::string& snapshot_path);
-    
-    /**
-     * Set snapshot in progress flag
-     */
-    void set_snapshot_in_progress(bool snapshot_in_progress);
+    void refresh_nodes(const std::string& nodes, bool allow_single_node_reset);
 
 private:
     /**
-     * Get URL path for a given peer
+     * Check health with leader (for followers)
      */
-    std::string get_node_url_path(const braft::PeerId& peer_id, 
-                                  const std::string& path,
-                                  const std::string& protocol) const;
+    void check_leader_health(const braft::NodeStatus& local_status);
+
 };
