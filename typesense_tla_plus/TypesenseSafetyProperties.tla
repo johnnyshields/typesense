@@ -5,8 +5,6 @@
 \* 2. Term/Config quorum checks  
 \* 3. Single-node change safety
 \* 4. Configuration version comparison
-\*
-\* Based on MongoDB's TLA+ safety patterns
 
 EXTENDS TypesenseRaft
 
@@ -59,7 +57,7 @@ ValidateNewConfigQuorum(oldServers, newServers) ==
     /\ LET newMajority == Majority(newServers)
        IN newMajority >= 1 /\ newMajority <= Cardinality(newServers)
 
-\* MongoDB-style ConfigIsSafe check (comprehensive safety validation)
+\* Comprehensive safety validation
 ConfigIsSafe(s) ==
     /\ HasValidTermQuorum(s)
     /\ HasValidConfigQuorum(s)

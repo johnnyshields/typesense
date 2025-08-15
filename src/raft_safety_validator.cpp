@@ -1,7 +1,7 @@
 #include "raft_server.h"
 #include "logger.h"
 
-// MongoDB TLA+ Safety Validation Module
+// TLA+ Safety Validation Module
 // Extracted from raft_server.cpp for better organization
 
 void ReplicationState::handle_peer_failure(const braft::PeerId& failed_peer_id) {
@@ -61,7 +61,7 @@ bool ReplicationState::add_node_safe(const std::string& node_to_add) {
         return false;
     }
     
-    // Step 5: Joint consensus validation (MongoDB HasQuorumOverlap)
+    // Step 5: Joint consensus validation (TLA+ HasQuorumOverlap)
     if (!has_quorum_overlap(new_config)) {
         LOG(WARNING) << "New configuration would not have valid quorum overlap";
         return false;
@@ -101,7 +101,7 @@ bool ReplicationState::remove_node_safe(const std::string& node_to_remove) {
         return false;
     }
     
-    // Step 5: Joint consensus validation (MongoDB HasQuorumOverlap)
+    // Step 5: Joint consensus validation (TLA+ HasQuorumOverlap)
     if (!has_quorum_overlap(new_config)) {
         LOG(WARNING) << "New configuration would not have valid quorum overlap";
         return false;
@@ -201,12 +201,12 @@ bool ReplicationState::config_is_safe() const {
         return false;
     }
     
-    LOG(DEBUG) << "MongoDB TLA+ ConfigIsSafe validation passed";
+    LOG(DEBUG) << "ConfigIsSafe validation passed";
     return true;
 }
 
 bool ReplicationState::has_valid_term_quorum() const {
-    // MongoDB TLA+ TermQuorumCheck pattern
+    // TLA+ TermQuorumCheck pattern
     // Ensures that the current leader has authority in the current term
     
     if (!node) {
@@ -246,7 +246,7 @@ bool ReplicationState::has_valid_term_quorum() const {
 }
 
 bool ReplicationState::has_valid_config_quorum() const {
-    // MongoDB TLA+ ConfigQuorumCheck pattern  
+    // TLA+ ConfigQuorumCheck pattern
     // Ensures that the current configuration is acknowledged by a quorum of nodes
     
     if (!node) {
@@ -290,7 +290,7 @@ bool ReplicationState::has_valid_config_quorum() const {
 }
 
 bool ReplicationState::are_previous_ops_committed() const {
-    // MongoDB TLA+ OpCommittedInConfig pattern
+    // TLA+ OpCommittedInConfig pattern
     // Ensures that operations from previous configurations are committed before changing config
     
     if (!node) {
@@ -351,7 +351,7 @@ bool ReplicationState::has_quorum_overlap(const NodeConfiguration& new_config) c
         return false;
     }
     
-    // MongoDB-style joint consensus validation: check intersection overlap
+    // Joint consensus validation: check intersection overlap
     std::set<std::string> current_nodes, intersection;
     size_t current_total_nodes = 0;
     
@@ -371,7 +371,7 @@ bool ReplicationState::has_quorum_overlap(const NodeConfiguration& new_config) c
                              new_nodes.begin(), new_nodes.end(),
                              std::inserter(intersection, intersection.begin()));
         
-        // MongoDB's HasQuorumOverlap: intersection must satisfy both quorums
+        // TLA+ HasQuorumOverlap: intersection must satisfy both quorums
         if (intersection.size() < current_quorum_size || intersection.size() < new_quorum_size) {
             LOG(DEBUG) << "Joint consensus validation failed - insufficient overlap: "
                        << "intersection=" << intersection.size() 

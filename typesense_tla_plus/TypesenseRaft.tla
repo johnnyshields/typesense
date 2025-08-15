@@ -1,7 +1,6 @@
 ---- MODULE TypesenseRaft ----
 \* Formal TLA+ specification for Typesense's Raft implementation
-\* Based on MongoDB's Raft specifications with Typesense-specific adaptations
-\* 
+\*
 \* This specification focuses on:
 \* 1. Core Raft safety properties (leader election, log replication)
 \* 2. Configuration change safety (single-node changes)
@@ -126,13 +125,13 @@ HasEntry(s, index) == index <= LastLogIndex(s) /\ index > 0
 GetEntryTerm(s, index) == 
     IF HasEntry(s, index) THEN log[s][index].term ELSE 0
 
-\* Check if configuration is newer (MongoDB-style comparison)
+\* Check if configuration is newer
 \* Handles uninitialized terms (Nil) for force reconfigs
 IsNewerConfig(newVersion, newTerm, oldVersion, oldTerm) ==
     \* If either term is uninitialized (Nil), ignore terms and compare versions only
     \* This allows force reconfigs to override other configs using high version numbers
     \/ newTerm = Nil \/ oldTerm = Nil => newVersion > oldVersion
-    \* Standard MongoDB TLA+ ordering: term first, then version
+    \* Ordering: term first, then version
     \/ newTerm > oldTerm
     \/ (newTerm = oldTerm /\ newVersion > oldVersion)
 
@@ -144,7 +143,7 @@ ValidateConfigChange(oldServers, newServers) ==
     IN Cardinality(added) + Cardinality(removed) = 1
 
 \* Check if configuration change maintains quorum overlap
-\* MongoDB's joint consensus approach - intersection must satisfy both quorums
+\* Joint consensus: intersection must satisfy both quorums
 HasQuorumOverlap(oldServers, newServers) ==
     LET oldMajority == Majority(oldServers)
         newMajority == Majority(newServers)

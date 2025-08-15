@@ -2,12 +2,12 @@
 
 ## Overview
 
-Typesense implements a production-ready Raft consensus algorithm with **DNS-native operations** and **MongoDB TLA+ safety patterns**. This implementation provides distributed consensus for Typesense clusters with enterprise-grade reliability and disaster recovery capabilities.
+Typesense implements a production-ready Raft consensus algorithm with **DNS-native operations** and **TLA+ safety patterns**. This implementation provides distributed consensus for Typesense clusters with enterprise-grade reliability and disaster recovery capabilities.
 
 ### Key Features
 
 - **🌐 DNS-Native Operations**: First-class hostname support with dynamic resolution
-- **🛡️ MongoDB TLA+ Safety**: Battle-tested safety patterns from MongoDB's formal specifications
+- **🛡️ TLA+ Safety**: Battle-tested safety patterns from formal specifications
 - **⚡ Immediate Failure Recovery**: 90% faster disaster recovery through DNS re-resolution
 - **🔧 Safe Configuration Changes**: Single-node membership changes with comprehensive validation
 - **📊 Production Monitoring**: Comprehensive status reporting and health checks
@@ -18,13 +18,13 @@ Typesense implements a production-ready Raft consensus algorithm with **DNS-nati
 
 ### 1.1 Modular Design
 
-The Raft implementation follows a **modular architecture** inspired by MongoDB's approach, with clear separation of concerns:
+The Raft implementation follows a **modular architecture**, with clear separation of concerns:
 
 ```
 src/
 ├── raft_server.cpp              (246 lines) - Slim Coordinator
 ├── raft_config_manager.cpp      (400 lines) - DNS & Configuration  
-├── raft_safety_validator.cpp    (300 lines) - MongoDB TLA+ Safety
+├── raft_safety_validator.cpp    (300 lines) - TLA+ Safety
 ├── raft_http_handler.cpp        (400 lines) - HTTP Processing
 ├── raft_lifecycle_manager.cpp   (500 lines) - Raft Lifecycle & Snapshots
 └── raft_node_manager.cpp        (300 lines) - Node Management & Status
@@ -74,7 +74,7 @@ bool peer_matches_hostname_node(const braft::PeerId& peer_id, const std::string&
 ```
 
 #### **🛡️ Safety Validator (`raft_safety_validator.cpp`)**
-- **Purpose**: MongoDB TLA+ safety pattern implementation
+- **Purpose**: TLA+ safety pattern implementation
 - **Key Features**:
   - ConfigIsSafe comprehensive validation
   - Term and configuration quorum checks
@@ -82,7 +82,7 @@ bool peer_matches_hostname_node(const braft::PeerId& peer_id, const std::string&
   - Failure-triggered DNS re-resolution
 
 ```cpp
-// MongoDB TLA+ safety patterns
+// TLA+ safety patterns
 bool config_is_safe() const;
 bool has_term_quorum_check() const;
 bool has_config_quorum_check() const;
@@ -155,7 +155,7 @@ struct NodeConfiguration {
     int64_t config_term;                      // Raft term when config was created
     std::chrono::steady_clock::time_point created_at;  // Creation timestamp
     
-    // MongoDB TLA+ methods
+    // TLA+ methods
     bool is_newer_than(const NodeConfiguration& other) const;
     bool is_safe_single_node_change(const NodeConfiguration& new_config) const;
     NodeConfiguration create_single_node_change(const std::string& node_to_add, 
@@ -168,9 +168,9 @@ struct NodeConfiguration {
 
 ## 2. 🛡️ Safety Methods & Patterns
 
-### 2.1 MongoDB TLA+ Safety Implementation
+### 2.1 TLA+ Safety Implementation
 
-Our implementation incorporates **MongoDB's formally verified TLA+ safety patterns** to ensure correctness and prevent data loss during configuration changes.
+Our implementation incorporates **formally verified TLA+ safety patterns** to ensure correctness and prevent data loss during configuration changes.
 
 #### **2.1.0 Naming Convention**
 
@@ -189,11 +189,11 @@ We maintain consistent naming between TLA+ specifications and C++ implementation
 
 #### **2.1.1 ConfigIsSafe - Master Safety Check**
 
-The `config_is_safe()` method implements MongoDB's comprehensive safety validation:
+The `config_is_safe()` method implements a comprehensive safety validation:
 
 ```cpp
 bool ReplicationState::config_is_safe() const {
-    // MongoDB TLA+ ConfigIsSafe implementation
+    // TLA+ ConfigIsSafe implementation
     // Combines three critical safety checks
     
     // Check 1: TermQuorumCheck - Ensures leader authority in current term
@@ -224,7 +224,7 @@ bool ReplicationState::config_is_safe() const {
 
 ```cpp
 bool ReplicationState::has_term_quorum_check() const {
-    // MongoDB TLA+ TermQuorumCheck pattern
+    // TLA+ TermQuorumCheck pattern
     // Ensures that the current leader has authority in the current term
     
     if (!is_leader()) {
@@ -258,7 +258,7 @@ bool ReplicationState::has_term_quorum_check() const {
 
 ```cpp
 bool ReplicationState::has_config_quorum_check() const {
-    // MongoDB TLA+ ConfigQuorumCheck pattern  
+    // TLA+ ConfigQuorumCheck pattern  
     // Ensures that the current configuration is acknowledged by a quorum of nodes
     
     braft::NodeStatus status;
@@ -284,7 +284,7 @@ bool ReplicationState::has_config_quorum_check() const {
 
 ```cpp
 bool ReplicationState::are_previous_ops_committed_in_current_config() const {
-    // MongoDB TLA+ OpCommittedInConfig pattern
+    // TLA+ OpCommittedInConfig pattern
     // Ensures that operations from previous configurations are committed
     
     braft::NodeStatus status;
@@ -317,11 +317,11 @@ bool ReplicationState::are_previous_ops_committed_in_current_config() const {
 
 #### **2.2.1 Symmetric Difference Algorithm**
 
-We implement MongoDB's **symmetric difference algorithm** for precise single-node change validation:
+We implement a **symmetric difference algorithm** for precise single-node change validation:
 
 ```cpp
 bool NodeConfiguration::is_safe_single_node_change(const NodeConfiguration& new_config) const {
-    // MongoDB TLA+ pattern: Use set symmetric difference
+    // TLA+ pattern: Use set symmetric difference
     
     // Create sets of all nodes
     std::set<std::string> old_nodes_set, new_nodes_set;
@@ -350,7 +350,7 @@ bool NodeConfiguration::is_safe_single_node_change(const NodeConfiguration& new_
         std::back_inserter(symmetric_diff)
     );
     
-    // MongoDB rule: Single-node change means symmetric difference size must be exactly 1
+    // Rule: Single-node change means symmetric difference size must be exactly 1
     return symmetric_diff.size() == 1 && new_config.total_nodes() >= 1;
 }
 ```
@@ -369,7 +369,7 @@ bool ReplicationState::add_node_safe(const std::string& node_to_add) {
         return false;
     }
     
-    // Step 2: MongoDB TLA+ ConfigIsSafe validation
+    // Step 2: TLA+ ConfigIsSafe validation
     if (!config_is_safe()) {
         return false;
     }
@@ -423,12 +423,12 @@ void ReplicationState::handle_peer_failure(const braft::PeerId& failed_peer_id) 
 bool NodeConfiguration::is_newer_than(const NodeConfiguration& other) const {
     const int64_t kUninitializedTerm = -1;
     
-    // MongoDB pattern: Handle force reconfigs (term=-1)
+    // TLA+ pattern: Handle force reconfigs (term=-1)
     if (config_term == kUninitializedTerm || other.config_term == kUninitializedTerm) {
         return config_version > other.config_version;  // Version-only comparison
     }
     
-    // Standard MongoDB TLA+ ordering: term first, then version
+    // Standard TLA+ ordering: term first, then version
     return config_term > other.config_term || 
            (config_term == other.config_term && config_version > other.config_version);
 }
@@ -437,7 +437,7 @@ bool NodeConfiguration::is_newer_than(const NodeConfiguration& other) const {
 **Features**:
 - ✅ **Force reconfig support**: Emergency reconfigurations with term=-1
 - ✅ **Conflict prevention**: Proper (term, version) ordering
-- ✅ **MongoDB compatibility**: Matches production patterns
+- ✅ **TLA+ compatibility**: Matches production patterns
 
 ### 2.4 Quorum Validation
 
@@ -445,7 +445,7 @@ bool NodeConfiguration::is_newer_than(const NodeConfiguration& other) const {
 
 ```cpp
 bool ReplicationState::has_quorum_overlap(const NodeConfiguration& new_config) const {
-    // TLA+ HasQuorumOverlap - MongoDB's joint consensus safety implementation
+    // TLA+ HasQuorumOverlap - joint consensus safety implementation
     
     size_t new_total_nodes = new_config.total_nodes();
     if (new_total_nodes == 0) {
@@ -459,7 +459,7 @@ bool ReplicationState::has_quorum_overlap(const NodeConfiguration& new_config) c
         return false;
     }
     
-    // MongoDB-style joint consensus validation: check intersection overlap
+    // Joint consensus validation: check intersection overlap
     std::set<std::string> current_nodes, intersection;
     size_t current_total_nodes = 0;
     
@@ -479,7 +479,7 @@ bool ReplicationState::has_quorum_overlap(const NodeConfiguration& new_config) c
                              new_nodes.begin(), new_nodes.end(),
                              std::inserter(intersection, intersection.begin()));
         
-        // MongoDB's HasQuorumOverlap: intersection must satisfy both quorums
+        // TLA+ HasQuorumOverlap: intersection must satisfy both quorums
         if (intersection.size() < current_quorum_size || intersection.size() < new_quorum_size) {
             LOG(DEBUG) << "Joint consensus validation failed - insufficient overlap: "
                        << "intersection=" << intersection.size() 
@@ -497,7 +497,7 @@ bool ReplicationState::has_quorum_overlap(const NodeConfiguration& new_config) c
 }
 ```
 
-**MongoDB Joint Consensus Examples:**
+**Joint Consensus Examples:**
 - ✅ **Safe**: `[A,B,C] → [A,B,D]` (intersection `[A,B]` = 2 ≥ quorum 2)
 - ❌ **Unsafe**: `[A,B,C] → [D,E,F]` (intersection `[]` = 0 < quorum 2) - **Split-brain risk!**
 - ❌ **Unsafe**: `[A,B,C] → [A,D,E]` (intersection `[A]` = 1 < quorum 2) - **Insufficient overlap!**
@@ -511,14 +511,14 @@ bool ReplicationState::has_quorum_overlap(const NodeConfiguration& new_config) c
 1. **Safety Validation**
    ```
    is_config_safe_for_reconfig() → Basic checks (leader, committed entries, quorum)
-   config_is_safe()              → TLA+ ConfigIsSafe (comprehensive MongoDB validation)
+   config_is_safe()              → TLA+ ConfigIsSafe (comprehensive validation)
    ```
 
 2. **Single-Node Validation**
    ```
    create_single_node_change()     → Generate new configuration
    validate_config_change()        → TLA+ ValidateConfigChange (symmetric difference)
-   has_quorum_overlap()            → TLA+ HasQuorumOverlap (MongoDB joint consensus)
+   has_quorum_overlap()            → TLA+ HasQuorumOverlap (joint consensus)
    ```
 
 3. **Application**
@@ -583,7 +583,7 @@ Our implementation includes **200+ comprehensive test cases** covering:
 - **DNS Failure Handling**: 14 tests
 - **Disaster Recovery Integration**: 11 tests  
 - **Safe Config Changes**: 15 tests
-- **MongoDB TLA+ Safety**: 20 tests
+- **TLA+ Safety**: 20 tests
 - **Raft Server Core**: 5 tests
 - **Config Manager Module**: 35 tests
 - **Safety Validator Module**: 30 tests
@@ -593,13 +593,13 @@ Our implementation includes **200+ comprehensive test cases** covering:
 
 ### 4.2 Key Test Categories
 
-#### **MongoDB TLA+ Safety Tests**
+#### **TLA+ Safety Tests**
 ```cpp
-TEST_F(MongoDBTLASafetyTest, ConfigIsSafeBasicValidation)
-TEST_F(MongoDBTLASafetyTest, TermQuorumCheckValidation)
-TEST_F(MongoDBTLASafetyTest, ConfigQuorumCheckValidation)
-TEST_F(MongoDBTLASafetyTest, OpCommittedInConfigValidation)
-TEST_F(MongoDBTLASafetyTest, SymmetricDifferenceValidation)
+TEST_F(RaftTLASafetyTest, ConfigIsSafeBasicValidation)
+TEST_F(RaftTLASafetyTest, TermQuorumCheckValidation)
+TEST_F(RaftTLASafetyTest, ConfigQuorumCheckValidation)
+TEST_F(RaftTLASafetyTest, OpCommittedInConfigValidation)
+TEST_F(RaftTLASafetyTest, SymmetricDifferenceValidation)
 ```
 
 #### **DNS & Configuration Tests**
@@ -631,7 +631,7 @@ TEST_F(RaftConfigManagerTest, ConfigurationSerializationRoundTrip)
 **Safety Validator Tests**
 ```cpp
 TEST_F(RaftSafetyValidatorTest, HandlePeerFailureHostnameMatch)
-TEST_F(RaftSafetyValidatorTest, MongoDBTLAPatternsStructure)
+TEST_F(RaftSafetyValidatorTest, TLAPatternsStructure)
 TEST_F(RaftSafetyValidatorTest, ThreadSafetySafetyValidation)
 TEST_F(RaftSafetyValidatorTest, SafetyValidationPerformance)
 TEST_F(RaftSafetyValidatorTest, AtomicOperationsThreadSafety)
@@ -682,7 +682,7 @@ immediate_refresh_threshold = 90s
 
 #### **Safety Settings**
 ```ini
-# MongoDB TLA+ safety enforcement
+# TLA+ safety enforcement
 enforce_config_safety = true
 require_term_quorum_check = true
 require_config_quorum_check = true
@@ -753,7 +753,7 @@ struct NodeConfiguration {
     std::chrono::steady_clock::time_point created_at;  // Timestamp
     
     bool is_newer_than(const NodeConfiguration& other) const {
-        // MongoDB TLA+ ordering: term first, then version
+        // TLA+ ordering: term first, then version
         return config_term > other.config_term || 
                (config_term == other.config_term && config_version > other.config_version);
     }
@@ -762,7 +762,7 @@ struct NodeConfiguration {
 
 ### 6.3 Joint Consensus Support
 
-While not fully implemented, the architecture supports MongoDB's joint consensus pattern for complex configuration changes:
+While not fully implemented, the architecture supports a joint consensus pattern for complex configuration changes:
 
 ```cpp
 // Future: Joint consensus for multi-node changes
@@ -785,7 +785,7 @@ bool validate_joint_consensus(const NodeConfiguration& old_config,
 The Typesense Raft implementation provides:
 
 ### **✅ Enterprise-Grade Reliability**
-- MongoDB TLA+ formally verified safety patterns
+- TLA+ formally verified safety patterns
 - Comprehensive configuration change validation
 - Automatic disaster recovery capabilities
 - Production-tested algorithms
@@ -808,4 +808,4 @@ The Typesense Raft implementation provides:
 - Performance monitoring and health checks
 - Operational tools and APIs
 
-This implementation represents a **production-ready, enterprise-grade Raft consensus system** that combines the reliability of MongoDB's proven patterns with innovative DNS-native capabilities for modern cloud deployments. 
+This implementation represents a **production-ready, enterprise-grade Raft consensus system** that combines reliable, proven patterns with innovative DNS-native capabilities for modern cloud deployments.

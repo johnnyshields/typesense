@@ -5,7 +5,7 @@
 #include "string_utils.h"
 
 // Unit Tests for raft_safety_validator.cpp
-// Tests MongoDB TLA+ safety patterns and peer failure handling
+// Tests TLA+ safety patterns and peer failure handling
 
 class RaftSafetyValidatorTest : public ::testing::Test {
 protected:
@@ -83,31 +83,31 @@ TEST_F(RaftSafetyValidatorTest, GetCurrentTermWithoutNode) {
     EXPECT_EQ(0, term); // Should return 0 when node is null
 }
 
-// Test config_is_safe functionality (MongoDB TLA+ pattern)
+// Test config_is_safe functionality (TLA+ pattern)
 TEST_F(RaftSafetyValidatorTest, ConfigIsSafeWithoutNode) {
     bool result = repl_state->config_is_safe();
     EXPECT_FALSE(result); // Should fail without proper raft node
 }
 
-// Test has_valid_term_quorum functionality (MongoDB TLA+ HasValidTermQuorum)
+// Test has_valid_term_quorum functionality (TLA+ HasValidTermQuorum)
 TEST_F(RaftSafetyValidatorTest, HasValidTermQuorumWithoutNode) {
     bool result = repl_state->has_valid_term_quorum();
     EXPECT_FALSE(result); // Should fail without raft node
 }
 
-// Test has_valid_config_quorum functionality (MongoDB TLA+ HasValidConfigQuorum)
+// Test has_valid_config_quorum functionality (TLA+ HasValidConfigQuorum)
 TEST_F(RaftSafetyValidatorTest, HasValidConfigQuorumWithoutNode) {
     bool result = repl_state->has_valid_config_quorum();
     EXPECT_FALSE(result); // Should fail without raft node
 }
 
-// Test are_previous_ops_committed functionality (MongoDB TLA+ ArePreviousOpsCommitted)
+// Test are_previous_ops_committed functionality (TLA+ ArePreviousOpsCommitted)
 TEST_F(RaftSafetyValidatorTest, ArePreviousOpsCommittedWithoutNode) {
     bool result = repl_state->are_previous_ops_committed();
     EXPECT_FALSE(result); // Should fail without raft node
 }
 
-// Test has_quorum_overlap functionality (MongoDB TLA+ HasQuorumOverlap)
+// Test has_quorum_overlap functionality (TLA+ HasQuorumOverlap)
 TEST_F(RaftSafetyValidatorTest, HasQuorumOverlapEmptyConfig) {
     NodeConfiguration empty_config;
     bool result = repl_state->has_quorum_overlap(empty_config);
@@ -132,7 +132,7 @@ TEST_F(RaftSafetyValidatorTest, HasQuorumOverlapFiveNodes) {
     EXPECT_TRUE(result); // Five nodes should be valid (quorum = 3)
 }
 
-// Test MongoDB-style joint consensus intersection validation
+// Test joint consensus intersection validation
 TEST_F(RaftSafetyValidatorTest, HasQuorumOverlapJointConsensus) {
     // Set up current configuration: [A, B, C] (quorum = 2)
     std::string current_config = "nodeA.example.com:8107:8108,nodeB.example.com:8107:8108,nodeC.example.com:8107:8108";
@@ -201,16 +201,16 @@ TEST_F(RaftSafetyValidatorTest, SafetyValidationEdgeCases) {
     }
 }
 
-// Test MongoDB TLA+ pattern implementation details
-TEST_F(RaftSafetyValidatorTest, MongoDBTLAPatternsStructure) {
-    // Test that the MongoDB TLA+ methods are properly structured
-    
-            // config_is_safe should combine all three checks
-        bool config_safe = repl_state->config_is_safe();
-        bool term_check = repl_state->has_valid_term_quorum();
-        bool config_check = repl_state->has_valid_config_quorum();
-        bool ops_check = repl_state->are_previous_ops_committed();
-    
+// Test TLA+ pattern implementation details
+TEST_F(RaftSafetyValidatorTest, TLAPatternsStructure) {
+    // Test that the TLA+ methods are properly structured
+
+    // config_is_safe should combine all three checks
+    bool config_safe = repl_state->config_is_safe();
+    bool term_check = repl_state->has_valid_term_quorum();
+    bool config_check = repl_state->has_valid_config_quorum();
+    bool ops_check = repl_state->are_previous_ops_committed();
+
     // Without proper raft node, all should be false
     EXPECT_FALSE(config_safe);
     EXPECT_FALSE(term_check);
@@ -684,7 +684,7 @@ TEST_F(RaftSafetyValidatorTest, SelfNodeDetection) {
 
 // Test configuration safety validation (simplified)
 TEST_F(RaftSafetyValidatorTest, ConfigSafeForReconfigSimplified) {
-    // Test basic safety checks without complex MongoDB state machines
+    // Test basic safety checks without complex state machines
     bool result = repl_state->is_config_safe_for_reconfig();
     
     // Should return false when not leader (which is expected without full setup)

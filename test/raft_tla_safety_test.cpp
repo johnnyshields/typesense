@@ -5,7 +5,7 @@
 #include <chrono>
 #include "raft_server.h"
 
-class MongoDBTLASafetyTest : public ::testing::Test {
+class RaftTLASafetyTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Setup test configurations
@@ -22,8 +22,8 @@ protected:
 };
 
 // Test ConfigIsSafe basic functionality
-TEST_F(MongoDBTLASafetyTest, ConfigIsSafeBasicValidation) {
-    // Test the MongoDB TLA+ ConfigIsSafe pattern
+TEST_F(RaftTLASafetyTest, ConfigIsSafeBasicValidation) {
+    // Test the TLA+ ConfigIsSafe pattern
     // Note: These tests validate the logic structure, not actual Raft node behavior
     
     NodeConfiguration config = ReplicationState::parse_node_configuration(three_node_config);
@@ -43,8 +43,8 @@ TEST_F(MongoDBTLASafetyTest, ConfigIsSafeBasicValidation) {
 }
 
 // Test TermQuorumCheck validation
-TEST_F(MongoDBTLASafetyTest, TermQuorumCheckValidation) {
-    // Test the MongoDB TLA+ TermQuorumCheck pattern
+TEST_F(RaftTLASafetyTest, TermQuorumCheckValidation) {
+    // Test the TLA+ TermQuorumCheck pattern
     NodeConfiguration config = ReplicationState::parse_node_configuration(three_node_config);
     
     // Test that term validation works with different term scenarios
@@ -68,7 +68,7 @@ TEST_F(MongoDBTLASafetyTest, TermQuorumCheckValidation) {
 }
 
 // Test ConfigQuorumCheck validation
-TEST_F(MongoDBTLASafetyTest, ConfigQuorumCheckValidation) {
+TEST_F(RaftTLASafetyTest, ConfigQuorumCheckValidation) {
     // Test configuration quorum requirements
     
     // Single node - no quorum possible
@@ -94,7 +94,7 @@ TEST_F(MongoDBTLASafetyTest, ConfigQuorumCheckValidation) {
 }
 
 // Test OpCommittedInConfig validation
-TEST_F(MongoDBTLASafetyTest, OpCommittedInConfigValidation) {
+TEST_F(RaftTLASafetyTest, OpCommittedInConfigValidation) {
     // Test that operations committed in previous configs remain committed
     
     NodeConfiguration original = ReplicationState::parse_node_configuration(three_node_config);
@@ -112,8 +112,8 @@ TEST_F(MongoDBTLASafetyTest, OpCommittedInConfigValidation) {
 }
 
 // Test quorum validation for new configurations
-TEST_F(MongoDBTLASafetyTest, NewConfigQuorumValidation) {
-    // Test MongoDB's alive nodes quorum check pattern
+TEST_F(RaftTLASafetyTest, NewConfigQuorumValidation) {
+    // Test alive nodes quorum check pattern
     
     NodeConfiguration three_node = ReplicationState::parse_node_configuration(three_node_config);
     
@@ -131,7 +131,7 @@ TEST_F(MongoDBTLASafetyTest, NewConfigQuorumValidation) {
 }
 
 // Test mixed hostname/IP configuration safety
-TEST_F(MongoDBTLASafetyTest, MixedConfigurationSafety) {
+TEST_F(RaftTLASafetyTest, MixedConfigurationSafety) {
     NodeConfiguration mixed = ReplicationState::parse_node_configuration(mixed_config);
     EXPECT_EQ(3, mixed.total_nodes());
     EXPECT_EQ(2, mixed.hostname_nodes.size());
@@ -154,7 +154,7 @@ TEST_F(MongoDBTLASafetyTest, MixedConfigurationSafety) {
 }
 
 // Test unsafe configuration changes
-TEST_F(MongoDBTLASafetyTest, UnsafeConfigurationChanges) {
+TEST_F(RaftTLASafetyTest, UnsafeConfigurationChanges) {
     NodeConfiguration original = ReplicationState::parse_node_configuration(three_node_config);
     
     // Test unsafe multi-node changes
@@ -181,7 +181,7 @@ TEST_F(MongoDBTLASafetyTest, UnsafeConfigurationChanges) {
 }
 
 // Test configuration metadata and serialization
-TEST_F(MongoDBTLASafetyTest, ConfigurationMetadata) {
+TEST_F(RaftTLASafetyTest, ConfigurationMetadata) {
     NodeConfiguration config = ReplicationState::parse_node_configuration(three_node_config);
     config.config_version = 10;
     config.config_term = 25;
@@ -203,7 +203,7 @@ TEST_F(MongoDBTLASafetyTest, ConfigurationMetadata) {
 }
 
 // Test concurrent safety operations
-TEST_F(MongoDBTLASafetyTest, ConcurrentSafetyOperations) {
+TEST_F(RaftTLASafetyTest, ConcurrentSafetyOperations) {
     const int num_threads = 4;
     const int operations_per_thread = 50;
     std::vector<std::thread> threads;
@@ -262,8 +262,8 @@ TEST_F(MongoDBTLASafetyTest, ConcurrentSafetyOperations) {
     EXPECT_EQ(0, failed_operations.load()); // No operations should fail
 }
 
-// Test performance of MongoDB TLA+ safety checks
-TEST_F(MongoDBTLASafetyTest, SafetyCheckPerformance) {
+// Test performance of TLA+ safety checks
+TEST_F(RaftTLASafetyTest, SafetyCheckPerformance) {
     NodeConfiguration base_config = ReplicationState::parse_node_configuration(five_node_config);
     
     auto start = std::chrono::high_resolution_clock::now();
@@ -280,7 +280,7 @@ TEST_F(MongoDBTLASafetyTest, SafetyCheckPerformance) {
         bool is_safe = base_config.validate_config_change(new_config);
         EXPECT_TRUE(is_safe);
         
-        // Check version comparison (MongoDB TLA+ pattern)
+        // Check version comparison (TLA+ pattern)
         bool is_newer = new_config.is_newer_than(base_config);
         EXPECT_TRUE(is_newer);
         
@@ -292,15 +292,15 @@ TEST_F(MongoDBTLASafetyTest, SafetyCheckPerformance) {
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
     
-    // Should complete MongoDB TLA+ safety operations quickly (target: under 50ms for 1000 operations)
-    EXPECT_LT(duration.count(), 50000) << "MongoDB TLA+ safety operations took: " << duration.count() << "μs";
+    // Should complete TLA+ safety operations quickly (target: under 50ms for 1000 operations)
+    EXPECT_LT(duration.count(), 50000) << "TLA+ safety operations took: " << duration.count() << "μs";
     
     double avg_time_per_op = static_cast<double>(duration.count()) / num_operations;
     EXPECT_LT(avg_time_per_op, 50.0) << "Average time per safety operation: " << avg_time_per_op << "μs";
 }
 
-// Test edge cases for MongoDB TLA+ patterns
-TEST_F(MongoDBTLASafetyTest, EdgeCasesAndErrorHandling) {
+// Test edge cases for TLA+ patterns
+TEST_F(RaftTLASafetyTest, EdgeCasesAndErrorHandling) {
     // Test empty configuration
     NodeConfiguration empty_config = ReplicationState::parse_node_configuration("");
     EXPECT_TRUE(empty_config.empty());
@@ -340,10 +340,8 @@ TEST_F(MongoDBTLASafetyTest, EdgeCasesAndErrorHandling) {
     EXPECT_TRUE(large.validate_config_change(large_plus_one));
 } 
 
-// Additional MongoDB-inspired test cases at the end of the file
-
-// Test MongoDB's symmetric difference algorithm specifically
-TEST_F(MongoDBTLASafetyTest, SymmetricDifferenceValidation) {
+// Test symmetric difference algorithm specifically
+TEST_F(RaftTLASafetyTest, SymmetricDifferenceValidation) {
     NodeConfiguration base = ReplicationState::parse_node_configuration(three_node_config);
     
     // Test valid single additions
@@ -373,8 +371,8 @@ TEST_F(MongoDBTLASafetyTest, SymmetricDifferenceValidation) {
     EXPECT_FALSE(base.validate_config_change(swap)); // Symmetric diff = 2
 }
 
-// Test MongoDB's uninitialized term handling
-TEST_F(MongoDBTLASafetyTest, UninitializedTermHandling) {
+// Test uninitialized term handling
+TEST_F(RaftTLASafetyTest, UninitializedTermHandling) {
     NodeConfiguration config1 = ReplicationState::parse_node_configuration(three_node_config);
     config1.config_term = 5;
     config1.config_version = 10;
@@ -400,8 +398,8 @@ TEST_F(MongoDBTLASafetyTest, UninitializedTermHandling) {
     EXPECT_TRUE(config4.is_newer_than(config2));
 }
 
-// Test MongoDB's replica set ID consistency pattern
-TEST_F(MongoDBTLASafetyTest, ConfigurationConsistencyValidation) {
+// Test replica set ID consistency pattern
+TEST_F(RaftTLASafetyTest, ConfigurationConsistencyValidation) {
     NodeConfiguration config1 = ReplicationState::parse_node_configuration(three_node_config);
     config1.config_term = 1;
     config1.config_version = 5;
@@ -421,8 +419,8 @@ TEST_F(MongoDBTLASafetyTest, ConfigurationConsistencyValidation) {
     EXPECT_FALSE(config3.is_newer_than(config1));
 }
 
-// Test MongoDB's arbiter priority validation pattern
-TEST_F(MongoDBTLASafetyTest, MixedNodeTypeValidation) {
+// Test arbiter priority validation pattern
+TEST_F(RaftTLASafetyTest, MixedNodeTypeValidation) {
     // Test mixed hostname and IP configurations
     std::string mixed_with_duplicates = "node1.example.com:8107:8108,192.168.1.10:8107:8108,node1.example.com:8107:8108";
     NodeConfiguration config = ReplicationState::parse_node_configuration(mixed_with_duplicates);
@@ -436,8 +434,8 @@ TEST_F(MongoDBTLASafetyTest, MixedNodeTypeValidation) {
     EXPECT_EQ(3, config_invalid.total_nodes()); // Should still parse, validation happens elsewhere
 }
 
-// Test MongoDB's quorum calculation edge cases
-TEST_F(MongoDBTLASafetyTest, QuorumCalculationEdgeCases) {
+// Test quorum calculation edge cases
+TEST_F(RaftTLASafetyTest, QuorumCalculationEdgeCases) {
     // Single node cluster
     NodeConfiguration single = ReplicationState::parse_node_configuration("node1.example.com:8107:8108");
     EXPECT_EQ(1, single.total_nodes());
@@ -446,7 +444,7 @@ TEST_F(MongoDBTLASafetyTest, QuorumCalculationEdgeCases) {
     NodeConfiguration two_node = ReplicationState::parse_node_configuration("node1.example.com:8107:8108,node2.example.com:8107:8108");
     EXPECT_EQ(2, two_node.total_nodes());
     
-    // Large cluster (MongoDB supports up to 50 members)
+    // Large cluster (supports up to 50 members)
     std::vector<std::string> many_nodes;
     for (int i = 1; i <= 50; ++i) {
         many_nodes.push_back("node" + std::to_string(i) + ".example.com:8107:8108");
@@ -461,8 +459,8 @@ TEST_F(MongoDBTLASafetyTest, QuorumCalculationEdgeCases) {
     EXPECT_TRUE(large.validate_config_change(large_plus_one));
 }
 
-// Test MongoDB's configuration change timing and versioning
-TEST_F(MongoDBTLASafetyTest, ConfigurationTimingAndVersioning) {
+// Test configuration change timing and versioning
+TEST_F(RaftTLASafetyTest, ConfigurationTimingAndVersioning) {
     NodeConfiguration base = ReplicationState::parse_node_configuration(three_node_config);
     base.config_term = 5;
     base.config_version = 10;
@@ -479,8 +477,8 @@ TEST_F(MongoDBTLASafetyTest, ConfigurationTimingAndVersioning) {
     EXPECT_TRUE(newer.is_newer_than(base));
 }
 
-// Test MongoDB's heartbeat and health check patterns
-TEST_F(MongoDBTLASafetyTest, HealthCheckPatterns) {
+// Test heartbeat and health check patterns
+TEST_F(RaftTLASafetyTest, HealthCheckPatterns) {
     NodeConfiguration config = ReplicationState::parse_node_configuration(five_node_config);
     
     // Test serialization with metadata (used for health checks)
@@ -495,8 +493,8 @@ TEST_F(MongoDBTLASafetyTest, HealthCheckPatterns) {
     EXPECT_TRUE(basic.find("version=") == std::string::npos);
 }
 
-// Test MongoDB's error handling and edge cases
-TEST_F(MongoDBTLASafetyTest, ErrorHandlingEdgeCases) {
+// Test error handling and edge cases
+TEST_F(RaftTLASafetyTest, ErrorHandlingEdgeCases) {
     // Empty configuration
     NodeConfiguration empty = ReplicationState::parse_node_configuration("");
     EXPECT_TRUE(empty.empty());
@@ -514,11 +512,11 @@ TEST_F(MongoDBTLASafetyTest, ErrorHandlingEdgeCases) {
     NodeConfiguration empty_plus_one = empty.create_single_node_change("node1.example.com:8107:8108", "", 1);
     EXPECT_EQ(1, empty_plus_one.total_nodes());
     // Empty to single node should be valid (bootstrap case)
-    // Note: MongoDB allows this for initial replica set creation
+    // Note: Allow this for initial replica set creation
 }
 
-// Test MongoDB's concurrent configuration change safety
-TEST_F(MongoDBTLASafetyTest, ConcurrentConfigurationChangeSafety) {
+// Test concurrent configuration change safety
+TEST_F(RaftTLASafetyTest, ConcurrentConfigurationChangeSafety) {
     const int num_threads = 8;
     const int changes_per_thread = 25;
     std::vector<std::thread> threads;

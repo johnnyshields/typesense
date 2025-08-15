@@ -15,7 +15,7 @@
 // Raft Server - Slim Coordinator
 // This file now coordinates the extracted modules:
 // - raft_config_manager.cpp: DNS & Configuration
-// - raft_safety_validator.cpp: MongoDB TLA+ Safety  
+// - raft_safety_validator.cpp: TLA+ Safety
 // - raft_http_handler.cpp: HTTP Processing
 // - raft_lifecycle_manager.cpp: Raft Lifecycle & Snapshots
 // - raft_node_manager.cpp: Node Management & Status

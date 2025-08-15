@@ -4,7 +4,7 @@
 
 ### **Problem**: `raft_server.cpp` is too large (2025+ lines)
 - **DNS & Configuration**: ~400 lines
-- **MongoDB TLA+ Safety**: ~300 lines  
+- **TLA+ Safety**: ~300 lines  
 - **HTTP Request Handling**: ~400 lines
 - **Raft Lifecycle & Snapshots**: ~500 lines
 - **Node Management**: ~300 lines
@@ -24,13 +24,13 @@
 - Peer matching (`peer_matches_hostname_node`)
 - Node string utilities (`to_nodes_config`)
 
-### **2. 📁 `src/raft_safety_validator.cpp` - MongoDB TLA+ Safety (✅ CREATED)**
+### **2. 📁 `src/raft_safety_validator.cpp` - TLA+ Safety (✅ CREATED)**
 **Lines**: ~300 → Separate file  
 **Responsibilities**:
 - Peer failure handling (`handle_peer_failure`)
 - Safe node operations (`add_node_safe`, `remove_node_safe`)
 - Configuration safety (`is_config_safe_for_reconfig`, `config_is_safe`)
-- MongoDB TLA+ patterns (`has_term_quorum_check`, `has_config_quorum_check`, etc.)
+- TLA+ patterns (`has_term_quorum_check`, `has_config_quorum_check`, etc.)
 - Quorum validation (`validate_new_config_quorum`)
 
 ### **3. 📁 `src/raft_http_handler.cpp` - HTTP Request Processing (🔄 TODO)**
@@ -73,7 +73,7 @@
 ### **Phase 1: Foundation (✅ COMPLETED)**
 - [x] Create `raft_config_manager.cpp` 
 - [x] Create `raft_safety_validator.cpp`
-- [x] Extract DNS and MongoDB TLA+ functionality
+- [x] Extract DNS and TLA+ functionality
 
 ### **Phase 2: HTTP & Lifecycle (✅ COMPLETED)**
 - [x] Create `raft_http_handler.cpp`
@@ -98,7 +98,7 @@
 src/
 ├── raft_server.cpp              (~125 lines) - Core coordination 🔄
 ├── raft_config_manager.cpp      (~400 lines) - DNS & Configuration ✅
-├── raft_safety_validator.cpp    (~300 lines) - MongoDB TLA+ Safety ✅
+├── raft_safety_validator.cpp    (~300 lines) - TLA+ Safety ✅
 ├── raft_http_handler.cpp        (~400 lines) - HTTP Processing ✅
 ├── raft_lifecycle_manager.cpp   (~500 lines) - Raft Lifecycle ✅
 └── raft_node_manager.cpp        (~300 lines) - Node Management ✅
@@ -118,7 +118,7 @@ include/
 
 ### **2. 🛠️ Better Maintainability**
 - Changes to DNS logic only affect `raft_config_manager.cpp`
-- MongoDB TLA+ improvements isolated to `raft_safety_validator.cpp`
+- TLA+ improvements isolated to `raft_safety_validator.cpp`
 - Easier to add new features without affecting other modules
 
 ### **3. 🧪 Enhanced Testability**

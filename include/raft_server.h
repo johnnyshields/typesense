@@ -28,13 +28,13 @@ class ReplicationState;
 /**
  * Represents a parsed node configuration with separate collections for hostnames and IPs.
  * This provides clear separation between hostname-based and IP-based peer configurations.
- * Includes versioning for safe configuration changes (inspired by MongoDB's TLA+ specs).
+ * Includes versioning for safe configuration changes (see TLA+ specs).
  */
 struct NodeConfiguration {
     std::vector<std::string> hostname_nodes;  // e.g., "node1.example.com:8107:8108"
     std::vector<std::string> ip_nodes;        // e.g., "192.168.1.1:8107:8108"
     
-    // Configuration versioning for safe changes (MongoDB TLA+ pattern)
+    // Configuration versioning for safe changes (TLA+ pattern)
     uint64_t config_version = 1;              // Incremented on each config change
     uint64_t config_term = 0;                 // Term when this config was created
     std::chrono::steady_clock::time_point created_at = std::chrono::steady_clock::now();
@@ -46,7 +46,7 @@ struct NodeConfiguration {
     
     /**
      * Get all nodes as a unified set for intersection calculations.
-     * Used by validate_new_config_quorum() for MongoDB-style joint consensus.
+     * Used by validate_new_config_quorum() for joint consensus.
      */
     std::set<std::string> get_node_set() const {
         std::set<std::string> node_set;
@@ -60,7 +60,7 @@ struct NodeConfiguration {
     }
     
     /**
-     * Check if this configuration is newer than another (MongoDB TLA+ pattern).
+     * Check if this configuration is newer than another (TLA+ pattern).
      * Compares by (config_term, config_version) tuple with uninitialized term handling.
      * 
      * TLA+ Reference: TypesenseRaft.tla -> IsNewerConfig()
@@ -75,7 +75,7 @@ struct NodeConfiguration {
             return config_version > other.config_version;
         }
         
-        // Standard MongoDB TLA+ ordering: term first, then version
+        // Standard TLA+ ordering: term first, then version
         // TLA+: newTerm > oldTerm \/ (newTerm = oldTerm /\ newVersion > oldVersion)
         return config_term > other.config_term || 
                (config_term == other.config_term && config_version > other.config_version);
@@ -83,7 +83,7 @@ struct NodeConfiguration {
     
     /**
      * Create a new configuration version for a single-node change.
-     * This implements MongoDB's safe single-node membership change pattern.
+     * This implements a safe single-node membership change pattern.
      */
     NodeConfiguration create_single_node_change(const std::string& node_to_add, 
                                                const std::string& node_to_remove,
@@ -121,7 +121,7 @@ struct NodeConfiguration {
     
     /**
      * Validate that a configuration change is safe (single node only).
-     * Implements MongoDB's single-node change safety rule using set symmetric difference.
+     * Implements a single-node change safety rule using set symmetric difference.
      * 
      * TLA+ Reference: TypesenseRaft.tla -> ValidateConfigChange()
      */
@@ -149,7 +149,7 @@ struct NodeConfiguration {
             new_nodes_set.insert(node);
         }
         
-        // MongoDB approach: Calculate symmetric difference
+        // Calculate symmetric difference
         // The symmetric difference is the set of elements that are in either set but not in both
         std::vector<std::string> symmetric_diff;
         symmetric_diff.reserve(old_nodes_set.size() + new_nodes_set.size());
@@ -352,7 +352,7 @@ private:
     // DNS cache for hostname resolution
     std::unique_ptr<RaftDNSCache> dns_cache_;
     
-    // MongoDB TLA+ ConfigIsSafe state tracking
+    // TLA+ ConfigIsSafe state tracking
     mutable std::shared_mutex safety_state_mutex;
     std::atomic<uint64_t> last_term_quorum_check;
     std::atomic<uint64_t> last_config_quorum_check;
@@ -487,13 +487,13 @@ public:
     void trigger_immediate_config_refresh();
 
     /**
-     * Safely add a single node to the cluster (MongoDB TLA+ pattern).
+     * Safely add a single node to the cluster (TLA+ pattern).
      * This prevents dangerous multi-node changes that could split quorums.
      */
     bool add_node_safe(const std::string& node_to_add);
 
     /**
-     * Safely remove a single node from the cluster (MongoDB TLA+ pattern).
+     * Safely remove a single node from the cluster (TLA+ pattern).
      * This prevents dangerous multi-node changes that could split quorums.
      */
     bool remove_node_safe(const std::string& node_to_remove);
@@ -505,16 +505,16 @@ public:
     bool is_config_safe_for_reconfig() const;
 
     /**
-     * MongoDB TLA+ ConfigIsSafe - comprehensive safety validation.
+     * TLA+ ConfigIsSafe - comprehensive safety validation.
      * Combines three critical safety checks: term quorum, config quorum, and committed operations.
-     * This is the master safety check from MongoDB's formally verified TLA+ specifications.
+     * This is the master safety check from the TLA+ specifications.
      * 
      * TLA+ Reference: TypesenseSafetyProperties.tla -> ConfigIsSafe()
      */
     bool config_is_safe() const;
 
     /**
-     * MongoDB TLA+ HasValidTermQuorum - ensures leader authority in current term.
+     * TLA+ HasValidTermQuorum - ensures leader authority in current term.
      * Verifies that the current leader has established authority with a quorum
      * in the current term before allowing configuration changes.
      * 
@@ -523,7 +523,7 @@ public:
     bool has_valid_term_quorum() const;
 
     /**
-     * MongoDB TLA+ HasValidConfigQuorum - ensures current config is acknowledged by quorum.
+     * TLA+ HasValidConfigQuorum - ensures current config is acknowledged by quorum.
      * Validates that the current configuration has been properly committed
      * and acknowledged by a majority of nodes before allowing changes.
      * 
@@ -532,7 +532,7 @@ public:
     bool has_valid_config_quorum() const;
 
     /**
-     * MongoDB TLA+ ArePreviousOpsCommitted - prevents data loss during config changes.
+     * TLA+ ArePreviousOpsCommitted - prevents data loss during config changes.
      * Ensures that operations committed in previous configurations remain committed
      * in the current configuration, preventing data loss during reconfiguration.
      * 
@@ -541,8 +541,8 @@ public:
     bool are_previous_ops_committed() const;
 
     /**
-     * MongoDB HasQuorumOverlap - validate joint consensus safety for configuration changes.
-     * Implements MongoDB's intersection-based safety check to prevent split-brain
+     * TLA+ HasQuorumOverlap - validate joint consensus safety for configuration changes.
+     * Implements intersection-based safety check to prevent split-brain
      * scenarios during configuration transitions. The intersection of old and new
      * node sets must be able to satisfy quorum requirements for both configurations.
      * 
@@ -643,7 +643,7 @@ private:
     std::string get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
                                   const std::string& protocol) const;
 
-    // Safety Validator Methods (MongoDB TLA+ patterns)
+    // Safety Validator Methods (TLA+ patterns)
     void handle_peer_failure(const braft::PeerId& failed_peer_id);
     void trigger_immediate_config_refresh();
     bool add_node_safe(const std::string& node_to_add);

@@ -8,7 +8,7 @@ Our TLA+ specifications formally verify the core safety properties we implemente
 
 - **Core Raft Safety**: Leader election, log replication, commit safety
 - **Configuration Change Safety**: Single-node changes with quorum overlap
-- **Advanced Safety Validation**: MongoDB TLA+-inspired ConfigIsSafe checks
+- **Advanced Safety Validation**: ConfigIsSafe checks
 - **Disaster Recovery Safety**: DNS-aware node addressing and failure handling
 
 ## Files
@@ -53,7 +53,7 @@ Our TLA+ specifications formally verify the core safety properties we implemente
 
 ## Key Safety Functions Verified
 
-Based on MongoDB's TLA+ patterns, we verify these critical safety functions:
+We verify these critical safety functions:
 
 ### ConfigIsSafe Validation
 ```tla
@@ -195,31 +195,16 @@ SafeAddServer(s, newServer) ==
     /\ AddServer(s, newServer)
 ```
 
-## Comparison with MongoDB
-
-Our specifications are based on MongoDB's TLA+ patterns but adapted for Typesense's simpler file-based configuration model:
-
-### Similarities
-- ConfigIsSafe validation pattern
-- Single-node configuration changes
-- Term and configuration versioning
-- Quorum overlap requirements
-
-### Differences  
-- **Simplified State Management**: No complex ConfigurationState enum
-- **File-Based Model**: Configuration changes via file updates, not interactive APIs
-- **DNS Abstraction**: DNS resolution abstracted for core Raft verification
-- **Streamlined Safety**: Focus on essential safety without MongoDB's complexity
-
 ## Future Extensions
 
 Potential extensions to the formal verification:
 
-1. **Liveness Properties**: Verify progress guarantees under fairness
+1. **Liveness Properties**: Verify progress guarantees under fairness, tracking configuration liveness states
 2. **Performance Models**: Model timing and performance characteristics
 3. **Network Partition Handling**: Verify behavior during network splits
 4. **DNS Resolution Details**: More detailed DNS failure and resolution models
 5. **Snapshot Verification**: Formal verification of snapshot safety
+6. **Move from File-Based Model to API-Based**: Do configuration changes via interactive APIs
 
 ## Contributing
 
@@ -233,6 +218,5 @@ When modifying the Raft implementation:
 ## References
 
 - [TLA+ Homepage](https://lamport.azurewebsites.net/tla/tla.html)
-- [MongoDB Raft TLA+ Specifications](../tla_plus/)
 - [Raft Consensus Algorithm Paper](https://raft.github.io/raft.pdf)
-- [TLA+ Model Checking Guide](https://learntla.com/introduction/) 
+- [TLA+ Model Checking Guide](https://learntla.com/introduction/)
