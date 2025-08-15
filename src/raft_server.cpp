@@ -89,6 +89,7 @@ int ReplicationState::start(const butil::EndPoint& peering_endpoint,
     }
     
     // Initialize database (implemented in raft_lifecycle_manager.cpp)
+    LOG(INFO) << "Node is ready, initializing database...";
     if(init_db() != 0) {
         LOG(ERROR) << "Failed to initialize database";
         return -1;

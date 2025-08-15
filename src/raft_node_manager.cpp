@@ -70,37 +70,41 @@ int RaftNodeManager::init_node(braft::StateMachine* fsm,
 
 bool RaftNodeManager::wait_until_ready(int timeout_ms, const std::atomic<bool>& quit_signal) {
     auto begin_ts = std::chrono::high_resolution_clock::now();
-    
+
     while(true) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-        
+
         auto current_ts = std::chrono::high_resolution_clock::now();
         auto time_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(current_ts - begin_ts).count();
-        
+
         if(time_elapsed > timeout_ms) {
             LOG(ERROR) << "Raft state not ready even after " << time_elapsed << " ms. Stopping.";
             return false;
         }
-        
+
         if(quit_signal.load()) {
             LOG(ERROR) << "Server is quitting abruptly.";
             return false;
         }
-        
+
         std::shared_lock lock(node_mutex);
         if(!node) {
             LOG(ERROR) << "Node is null during wait";
             return false;
         }
-        
+
         braft::NodeStatus status;
         node->get_status(&status);
-        
+
+        // Important: Check configuration size properly
         bool is_single_node = status.peer_manager.size() == 1;
-        bool ready = is_single_node || node->is_leader() || !node->leader_id().is_empty();
+        bool is_leader = node->is_leader();
+        bool has_leader = !node->leader_id().is_empty();
+        bool ready = is_single_node || is_leader || has_leader;
         
         if(ready) {
-            LOG(INFO) << "Raft node is now ready. single_node=" << is_single_node;
+            LOG(INFO) << "Raft node is now ready. Proceeding with DB init. ready=" << ready
+                      << ", single_node=" << is_single_node;
             return true;
         } else {
             LOG(INFO) << "Waiting for raft node to come online, time_elapsed=" << time_elapsed << " ms";
@@ -168,6 +172,11 @@ bool RaftNodeManager::is_leader() const {
     return node && node->is_leader();
 }
 
+bool RaftNodeManager::is_leader_safe_check() const {
+    std::shared_lock lock(node_mutex);
+    return node && node->is_leader();
+}
+
 braft::PeerId RaftNodeManager::leader_id() const {
     std::shared_lock lock(node_mutex);
     if (node) {
@@ -182,6 +191,16 @@ braft::NodeId RaftNodeManager::node_id() const {
         return node->node_id();
     }
     return braft::NodeId();
+}
+
+bool RaftNodeManager::has_leader() const {
+    std::shared_lock lock(node_mutex);
+    return node && (!node->is_leader() || !node->leader_id().is_empty());
+}
+
+bool RaftNodeManager::is_node_ready() const {
+    std::shared_lock lock(node_mutex);
+    return node != nullptr;
 }
 
 void RaftNodeManager::refresh_catchup_status(bool log_msg) {
@@ -210,7 +229,7 @@ void RaftNodeManager::refresh_catchup_status(bool log_msg) {
         return;
     }
     
-    // Calculate lag
+    // Calculate lag (work around for: https://github.com/baidu/braft/issues/277#issuecomment-823080171)
     int64_t current_index = (n_status.applying_index == 0) ? 
                            n_status.known_applied_index : n_status.applying_index;
     int64_t apply_lag = n_status.last_index - current_index;
@@ -220,21 +239,29 @@ void RaftNodeManager::refresh_catchup_status(bool log_msg) {
     int healthy_write_lag = config->get_healthy_write_lag();
     
     // Check read lag
-    if (apply_lag > healthy_read_lag || num_queued_writes > healthy_read_lag) {
-        LOG_IF(ERROR, log_msg) << "Read lag unhealthy: apply_lag=" << apply_lag 
-                              << ", queued=" << num_queued_writes;
+    if (apply_lag > healthy_read_lag) {
+        LOG_IF(ERROR, log_msg) << apply_lag << " lagging entries > healthy read lag of " << healthy_read_lag;
         read_caught_up = false;
     } else {
-        read_caught_up = true;
+        if(num_queued_writes > healthy_read_lag) {
+            LOG_IF(ERROR, log_msg) << num_queued_writes << " queued writes > healthy read lag of " << healthy_read_lag;
+            read_caught_up = false;
+        } else {
+            read_caught_up = true;
+        }
     }
     
     // Check write lag
-    if (apply_lag > healthy_write_lag || num_queued_writes > healthy_write_lag) {
-        LOG_IF(ERROR, log_msg) << "Write lag unhealthy: apply_lag=" << apply_lag 
-                              << ", queued=" << num_queued_writes;
+    if (apply_lag > healthy_write_lag) {
+        LOG_IF(ERROR, log_msg) << apply_lag << " lagging entries > healthy write lag of " << healthy_write_lag;
         write_caught_up = false;
     } else {
-        write_caught_up = true;
+        if(num_queued_writes > healthy_write_lag) {
+            LOG_IF(ERROR, log_msg) << num_queued_writes << " queued writes > healthy write lag of " << healthy_write_lag;
+            write_caught_up = false;
+        } else {
+            write_caught_up = true;
+        }
     }
     
     // For followers, check with leader
@@ -247,6 +274,7 @@ void RaftNodeManager::check_leader_health(const braft::NodeStatus& local_status)
     std::shared_lock lock(node_mutex);
     
     if(!node || node->leader_id().is_empty()) {
+        LOG(ERROR) << "Could not get leader status, as node does not have a leader!";
         return;
     }
     
@@ -265,14 +293,22 @@ void RaftNodeManager::check_leader_health(const braft::NodeStatus& local_status)
             nlohmann::json leader_status = nlohmann::json::parse(api_res);
             if(leader_status.contains("committed_index")) {
                 int64_t leader_committed = leader_status["committed_index"].get<int64_t>();
-                if(leader_committed > local_status.committed_index) {
-                    int lag = leader_committed - local_status.committed_index;
-                    read_caught_up = (lag < config->get_healthy_read_lag());
+                if(leader_committed <= local_status.committed_index) {
+                    // This can happen due to network latency in making the /status call
+                    // We will refrain from changing current status
+                    return;
                 }
+                read_caught_up = ((leader_committed - local_status.committed_index) < config->get_healthy_read_lag());
+            } else {
+                // We will refrain from changing current status
+                LOG(ERROR) << "Error, `committed_index` key not found in /status response from leader.";
             }
         } catch(const std::exception& e) {
             LOG(ERROR) << "Failed to parse leader status: " << e.what();
         }
+    } else {
+        // We will again refrain from changing current status
+        LOG(ERROR) << "Error, /status end-point returned bad status code " << status_code;
     }
 }
 
@@ -304,10 +340,16 @@ nlohmann::json RaftNodeManager::get_status() const {
 std::string RaftNodeManager::get_leader_url() const {
     std::shared_lock lock(node_mutex);
     
-    if(!node || node->leader_id().is_empty()) {
+    if(!node) {
+        LOG(ERROR) << "Could not get leader url as node is not initialized!";
         return "";
     }
-    
+
+    if(node->leader_id().is_empty()) {
+        LOG(ERROR) << "Could not get leader url, as node does not have a leader!";
+        return "";
+    }
+
     const braft::PeerId& leader_addr = node->leader_id();
     lock.unlock();
     
@@ -322,22 +364,26 @@ void RaftNodeManager::refresh_nodes(const std::string& nodes, bool allow_single_
         LOG(WARNING) << "Node state is not initialized: unable to refresh nodes.";
         return;
     }
-    
+
     braft::Configuration new_conf;
     new_conf.parse_from(nodes);
-    
+
     braft::NodeStatus nodeStatus;
     node->get_status(&nodeStatus);
-    
-    LOG(INFO) << "Refreshing nodes. Term: " << nodeStatus.term
-              << ", last_index: " << nodeStatus.last_index
-              << ", committed: " << nodeStatus.committed_index;
-    
+
+    // Important: Log comprehensive node status during refresh
+    log_node_status(nodeStatus, "Refreshing nodes");
+
     if(node->is_leader()) {
         RefreshNodesClosure* done = new RefreshNodesClosure;
         node->change_peers(new_conf, done);
     } else if(node->leader_id().is_empty()) {
-        // Handle single node IP change scenario
+        // When node is not a leader, does not have a leader and is also a single-node cluster,
+        // we forcefully reset its peers.
+        // NOTE: `reset_peers()` is not a safe call to make as we give up on consistency and consensus guarantees.
+        // We are doing this solely to handle single node cluster whose IP changes.
+        // Examples: Docker container IP change, local DHCP leased IP change etc.
+
         std::vector<braft::PeerId> latest_nodes;
         new_conf.list_peers(&latest_nodes);
         
@@ -348,6 +394,20 @@ void RaftNodeManager::refresh_nodes(const std::string& nodes, bool allow_single_
             LOG(WARNING) << "Multi-node with no leader: refusing to reset peers.";
         }
     }
+}
+
+void RaftNodeManager::log_node_status(const braft::NodeStatus& node_status, const std::string& prefix) const {
+    std::string log_prefix = prefix.empty() ? "" : prefix + ". ";
+
+    LOG(INFO) << log_prefix
+              << "Term: " << node_status.term
+              << ", pending_queue: " << node_status.pending_queue_size
+              << ", last_index: " << node_status.last_index
+              << ", committed: " << node_status.committed_index
+              << ", known_applied: " << node_status.known_applied_index
+              << ", applying: " << node_status.applying_index
+              << ", pending_writes: " << batched_indexer->get_queued_writes()
+              << ", local_sequence: " << store->get_latest_seq_number();
 }
 
 // Helper closure for refresh_nodes

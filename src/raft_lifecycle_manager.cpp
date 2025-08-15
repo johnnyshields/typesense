@@ -204,9 +204,13 @@ void* ReplicationState::save_snapshot(void* arg) {
 
 // Load a snapshot to restore state machine
 int ReplicationState::on_snapshot_load(braft::SnapshotReader* reader) {
+    // Critical safety check - leader should NEVER load a snapshot
+    CHECK(!node_manager || !node_manager->is_leader_safe_check()) 
+        << "Leader is not supposed to load snapshot";
+
     LOG(INFO) << "on_snapshot_load";
 
-    // ensures that reads and writes are rejected, as `store->reload()` unique locks the DB handle
+    // Ensure reads/writes are rejected during reload, as `store->reload()` unique locks the DB handle
     if(node_manager) {
         // This will set read_caught_up and write_caught_up to false internally
         node_manager->refresh_catchup_status(false);
@@ -220,8 +224,8 @@ int ReplicationState::on_snapshot_load(braft::SnapshotReader* reader) {
         // analytics db snapshot could be missing (older version or disabled earlier)
         int reload_store = analytics_store->reload(true, analytics_snapshot_path,
                                                    config->get_analytics_db_ttl());
-        if (reload_store != 0) {
-            LOG(ERROR) << "Failed to reload analytics db snapshot.";
+        if(reload_store != 0) {
+            LOG(ERROR) << "Failed to reload analytics db snapshot";
             return reload_store;
         }
     }

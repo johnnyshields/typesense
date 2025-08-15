@@ -129,6 +129,12 @@ public:
     bool is_leader() const;
     
     /**
+     * Thread-safe check if this node is leader (for safety assertions)
+     * Used for critical safety checks like snapshot loading
+     */
+    bool is_leader_safe_check() const;
+
+    /**
      * Get the leader's peer ID
      */
     braft::PeerId leader_id() const;
@@ -138,6 +144,16 @@ public:
      */
     braft::NodeId node_id() const;
     
+    /**
+     * Check if node has a leader (either is leader or knows who leader is)
+     */
+    bool has_leader() const;
+
+    /**
+     * Check if node is initialized and ready
+     */
+    bool is_node_ready() const;
+
     /**
      * Check if node is ready to serve reads
      */
@@ -184,6 +200,13 @@ public:
      * @param allow_single_node_reset Allow reset for single node
      */
     void refresh_nodes(const std::string& nodes, bool allow_single_node_reset);
+
+    /**
+     * Log current node status (for debugging/monitoring)
+     * @param node_status The status to log
+     * @param prefix Optional prefix for the log message
+     */
+    void log_node_status(const braft::NodeStatus& node_status, const std::string& prefix = "") const;
 
 private:
     /**
