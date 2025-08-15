@@ -45,19 +45,38 @@ struct NodeConfiguration {
     size_t total_nodes() const { return hostname_nodes.size() + ip_nodes.size(); }
     
     /**
+     * Get all nodes as a unified set for intersection calculations.
+     * Used by validate_new_config_quorum() for MongoDB-style joint consensus.
+     */
+    std::set<std::string> get_node_set() const {
+        std::set<std::string> node_set;
+        for (const auto& node : hostname_nodes) {
+            node_set.insert(node);
+        }
+        for (const auto& node : ip_nodes) {
+            node_set.insert(node);
+        }
+        return node_set;
+    }
+    
+    /**
      * Check if this configuration is newer than another (MongoDB TLA+ pattern).
      * Compares by (config_term, config_version) tuple with uninitialized term handling.
+     * 
+     * TLA+ Reference: TypesenseRaft.tla -> IsNewerConfig()
      */
     bool is_newer_than(const NodeConfiguration& other) const {
-        const int64_t uninitialized_term = -1;
+        const int64_t uninitialized_term = -1; // Equivalent to TLA+ Nil
         
-        // MongoDB pattern: If either term is uninitialized (-1), ignore terms and compare versions only
+        // TLA+ Pattern: If either term is uninitialized (Nil), ignore terms and compare versions only
         // This allows force reconfigs to override other configs using high version numbers
+        // TLA+: newTerm = Nil \/ oldTerm = Nil => newVersion > oldVersion
         if (config_term == uninitialized_term || other.config_term == uninitialized_term) {
             return config_version > other.config_version;
         }
         
         // Standard MongoDB TLA+ ordering: term first, then version
+        // TLA+: newTerm > oldTerm \/ (newTerm = oldTerm /\ newVersion > oldVersion)
         return config_term > other.config_term || 
                (config_term == other.config_term && config_version > other.config_version);
     }
@@ -103,10 +122,13 @@ struct NodeConfiguration {
     /**
      * Validate that a configuration change is safe (single node only).
      * Implements MongoDB's single-node change safety rule using set symmetric difference.
+     * 
+     * TLA+ Reference: TypesenseRaft.tla -> ValidateConfigChange()
      */
     bool is_safe_single_node_change(const NodeConfiguration& new_config) const {
-        // MongoDB TLA+ pattern: Use set symmetric difference to validate single-node changes
+        // TLA+ Pattern: Use set symmetric difference to validate single-node changes
         // This ensures that exactly one voting member is added or removed
+        // TLA+: Cardinality(added) + Cardinality(removed) = 1
         
         // Create sets of all nodes (both hostname and IP nodes are voting members)
         std::set<std::string> old_nodes_set, new_nodes_set;
@@ -138,7 +160,8 @@ struct NodeConfiguration {
             std::back_inserter(symmetric_diff)
         );
         
-        // MongoDB rule: Single-node change means symmetric difference size must be exactly 1
+        // TLA+ Rule: Single-node change means symmetric difference size must be exactly 1
+        // This implements: Cardinality(added) + Cardinality(removed) = 1
         if (symmetric_diff.size() != 1) {
             return false;
         }

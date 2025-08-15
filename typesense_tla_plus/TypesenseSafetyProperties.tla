@@ -51,6 +51,7 @@ ArePreviousOpsCommitted(s) ==
             /\ entry.configVersion = configVersion[s]
 
 \* Validate new configuration has valid quorum (single-node change safety)
+\* Matches C++ validate_new_config_quorum() implementation
 ValidateNewConfigQuorum(oldServers, newServers) ==
     /\ ValidateConfigChange(oldServers, newServers)
     /\ HasQuorumOverlap(oldServers, newServers)

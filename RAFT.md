@@ -430,6 +430,8 @@ bool NodeConfiguration::is_newer_than(const NodeConfiguration& other) const {
 
 ```cpp
 bool ReplicationState::validate_new_config_quorum(const NodeConfiguration& new_config) const {
+    // MongoDB's HasQuorumOverlap implementation for joint consensus safety
+    
     size_t new_total_nodes = new_config.total_nodes();
     if (new_total_nodes == 0) {
         return false;
@@ -442,20 +444,48 @@ bool ReplicationState::validate_new_config_quorum(const NodeConfiguration& new_c
         return false;
     }
     
-    // Check overlap with current configuration (joint consensus pattern)
-    size_t current_total_nodes = current_node_config.total_nodes();
+    // MongoDB-style joint consensus validation: check intersection overlap
+    std::set<std::string> current_nodes, intersection;
+    size_t current_total_nodes = 0;
+    
+    {
+        std::shared_lock<std::shared_mutex> lock(current_config_mutex);
+        current_total_nodes = current_node_config.total_nodes();
+        current_nodes = current_node_config.get_node_set();
+    }
+    
+    std::set<std::string> new_nodes = new_config.get_node_set();
+    
     if (current_total_nodes > 0) {
         size_t current_quorum_size = (current_total_nodes / 2) + 1;
         
-        // Ensure both old and new quorums can be achieved during transition
-        if (new_quorum_size > new_total_nodes || current_quorum_size > current_total_nodes) {
+        // Calculate intersection of current and new configurations
+        std::set_intersection(current_nodes.begin(), current_nodes.end(),
+                             new_nodes.begin(), new_nodes.end(),
+                             std::inserter(intersection, intersection.begin()));
+        
+        // MongoDB's HasQuorumOverlap: intersection must satisfy both quorums
+        if (intersection.size() < current_quorum_size || intersection.size() < new_quorum_size) {
+            LOG(DEBUG) << "Joint consensus validation failed - insufficient overlap: "
+                       << "intersection=" << intersection.size() 
+                       << ", current_quorum=" << current_quorum_size
+                       << ", new_quorum=" << new_quorum_size;
             return false;
         }
+        
+        LOG(DEBUG) << "Joint consensus validation passed - sufficient overlap: "
+                   << "intersection=" << intersection.size()
+                   << " >= max(" << current_quorum_size << "," << new_quorum_size << ")";
     }
     
     return true;
 }
 ```
+
+**MongoDB Joint Consensus Examples:**
+- ✅ **Safe**: `[A,B,C] → [A,B,D]` (intersection `[A,B]` = 2 ≥ quorum 2)
+- ❌ **Unsafe**: `[A,B,C] → [D,E,F]` (intersection `[]` = 0 < quorum 2) - **Split-brain risk!**
+- ❌ **Unsafe**: `[A,B,C] → [A,D,E]` (intersection `[A]` = 1 < quorum 2) - **Insufficient overlap!**
 
 ---
 
@@ -473,7 +503,7 @@ bool ReplicationState::validate_new_config_quorum(const NodeConfiguration& new_c
    ```
    create_single_node_change()     → Generate new configuration
    is_safe_single_node_change()    → Symmetric difference validation
-   validate_new_config_quorum()    → Ensure new config can achieve quorum
+   validate_new_config_quorum()    → MongoDB joint consensus validation
    ```
 
 3. **Application**

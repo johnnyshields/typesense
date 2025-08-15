@@ -175,24 +175,27 @@ uint64_t ReplicationState::get_current_term() const {
 }
 
 bool ReplicationState::config_is_safe() const {
-    // MongoDB TLA+ ConfigIsSafe implementation
+    // TLA+ Reference: TypesenseSafetyProperties.tla -> ConfigIsSafe()
     // This combines three safety checks: TermQuorumCheck, ConfigQuorumCheck, and OpCommittedInConfig
     
-    LOG(DEBUG) << "Performing MongoDB TLA+ ConfigIsSafe validation";
+    LOG(DEBUG) << "Performing TLA+ ConfigIsSafe validation";
     
     // Check 1: TermQuorumCheck - Ensures leader authority in current term
+    // TLA+: HasValidTermQuorum(s)
     if (!has_term_quorum_check()) {
         LOG(DEBUG) << "TermQuorumCheck failed - not safe for config changes";
         return false;
     }
     
     // Check 2: ConfigQuorumCheck - Ensures current config is acknowledged by quorum
+    // TLA+: HasValidConfigQuorum(s)
     if (!has_config_quorum_check()) {
         LOG(DEBUG) << "ConfigQuorumCheck failed - not safe for config changes";
         return false;
     }
     
     // Check 3: OpCommittedInConfig - Ensures no data loss during config changes
+    // TLA+: ArePreviousOpsCommitted(s)
     if (!are_previous_ops_committed_in_current_config()) {
         LOG(DEBUG) << "OpCommittedInConfig failed - not safe for config changes";
         return false;
@@ -331,7 +334,7 @@ bool ReplicationState::are_previous_ops_committed_in_current_config() const {
 }
 
 bool ReplicationState::validate_new_config_quorum(const NodeConfiguration& new_config) const {
-    // Validate that the new configuration can achieve quorum
+    // Validate that the new configuration can achieve quorum with proper joint consensus safety
     
     size_t new_total_nodes = new_config.total_nodes();
     if (new_total_nodes == 0) {
@@ -348,22 +351,38 @@ bool ReplicationState::validate_new_config_quorum(const NodeConfiguration& new_c
         return false;
     }
     
-    // Check overlap with current configuration (MongoDB's joint consensus pattern)
+    // MongoDB-style joint consensus validation: check intersection overlap
+    std::set<std::string> current_nodes, intersection;
     size_t current_total_nodes = 0;
+    
     {
         std::shared_lock<std::shared_mutex> lock(current_config_mutex);
         current_total_nodes = current_node_config.total_nodes();
+        current_nodes = current_node_config.get_node_set();
     }
+    
+    std::set<std::string> new_nodes = new_config.get_node_set();
     
     if (current_total_nodes > 0) {
         size_t current_quorum_size = (current_total_nodes / 2) + 1;
         
-        // Ensure both old and new quorums can be achieved during transition
-        // This is a simplified check - full joint consensus would be more complex
-        if (new_quorum_size > new_total_nodes || current_quorum_size > current_total_nodes) {
-            LOG(DEBUG) << "Quorum overlap validation failed during config transition";
+        // Calculate intersection of current and new configurations
+        std::set_intersection(current_nodes.begin(), current_nodes.end(),
+                             new_nodes.begin(), new_nodes.end(),
+                             std::inserter(intersection, intersection.begin()));
+        
+        // MongoDB's HasQuorumOverlap: intersection must satisfy both quorums
+        if (intersection.size() < current_quorum_size || intersection.size() < new_quorum_size) {
+            LOG(DEBUG) << "Joint consensus validation failed - insufficient overlap: "
+                       << "intersection=" << intersection.size() 
+                       << ", current_quorum=" << current_quorum_size
+                       << ", new_quorum=" << new_quorum_size;
             return false;
         }
+        
+        LOG(DEBUG) << "Joint consensus validation passed - sufficient overlap: "
+                   << "intersection=" << intersection.size()
+                   << " >= max(" << current_quorum_size << "," << new_quorum_size << ")";
     }
     
     LOG(DEBUG) << "New configuration quorum validation passed: " 
