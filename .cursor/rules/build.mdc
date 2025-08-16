@@ -6,107 +6,82 @@ alwaysApply: true
 
 # Build & Test
 
+## Overview
 This project has 3 test sets:
+1. C++ Unit tests in `/test`
+2. TypeScript API tests in `/api_tests`  
+3. TypeScript Benchmarks in `/benchmark`
 
-1. C++ Unit tests located in /test
-2. Typescript API tests located in /api_tests
-3. Typescript Benchmarks located in /benchmark
-
-If a user asks to test the project without more specific instructions, this typically means "run the unit tests, then the API tests." The benchmarks are optional; include them only if being thorough.
+**Default test command**: Run unit tests, then API tests. Benchmarks are optional unless being thorough.
 
 ## Unit Tests
 
-### Install unit test dependencies
+### Setup
+```bash
+# Install dependencies - ALWAYS check .github/workflows/tests.yml
+# Look specifically for "- name: Install dependencies" section
 
-See `.github/workflows/tests.yml` for dependencies. Look for `- name: Install dependencies`
-
-### Setup artifacts for unit tests
-
-```sh
+# Get test artifacts (skip mtime check if user asks to refresh)
 if [ ! -f ./test/resources/models.tar.gz ] || [ $(find ./test/resources/models.tar.gz -mtime +30 2>/dev/null | wc -l) -gt 0 ]; then
     curl https://dl.typesense.org/ci/tyrec/tyrec-1-models.tar.gz > ./test/resources/models.tar.gz
 fi
-```
 
-(ignore mtime check if user asks specifically to refresh artifacts)
-
-### Build core server binary
-
-```sh
+# Build server binary
 bazel build //:typesense-server
-```
 
-also refer to:
-
-```sh
+# Alternative: use convenience script
 ./ci_build_v2.sh
 ```
 
-### Build/run tests
-
-All unit tests:
-
-```sh
+### Run Tests
+```bash
+# All unit tests
 bazel test //:typesense-test --cache_test_results=no --test_output=all --test_timeout=900
-```
 
-Run a specific unit test:
-
-```sh
+# Specific test filter
 bazel test //:typesense-test --cache_test_results=no --test_output=all --test_timeout=30 --test_filter="*RaftServer*"
 ```
 
 ## API Tests
 
-### Install API test dependencies
+### Prerequisites
+```bash
+# Install bun OUTSIDE of snap confinement (critical!)
+# https://bun.sh/docs/installation
+# DO NOT use Node.js as alternative - it won't work
+```
 
-Refer to `.github/workflows/tests.yml` for dependencies. Look for `api-tests:`
-
-Install bun outside of snap confinement.
-https://bun.com/docs/installation
-
-### Download API test artifacts
-
-Refer to `.github/workflows/tests.yml` API artifacts version and replace `XX` (or cmd) below.
-
-```sh
-cd ./api-tests
+### Setup
+```bash
+# Check .github/workflows/tests.yml for exact version (replace XX below)
+# Look for "api-tests:" section
+cd ./api_tests
 mkdir -p ./artifacts
 curl https://dl.typesense.org/ci/typesense/vXX-snapshot-1.tar.gz > ./artifacts/vXX-snapshot.tar.gz
 tar -xzf ./artifacts/vXX-snapshot.tar.gz -C ./artifacts/
-```
 
-### Build API tests
-
-```sh
+# Build API tests
 cd api_tests && bun install && bun link
 ```
 
-### Run API tests
-
-Build core server binary as per Unit Tests section above, then find it with:
-
-```sh
+### Run
+```bash
+# First build core server (see Unit Tests section)
+# Then find binary path:
 bazel cquery --output=files //:typesense-server
-```
 
-then run:
-
-```sh
+# Run with binary path from above
 cd api_tests && TYPESENSE_BINARY_PATH="<bazel cquery path above>" TYPESENSE_DATA_DIR="./test-data" bun run src/cli.ts
 ```
 
 ### Troubleshooting
-
-- If you see GLBIC errors, they are probably due to bun being installed inside snap confinement.
-- Do not attempt to run Node.js as an alternative for bun.
+- **GLIBC errors** = bun installed in snap confinement (reinstall properly)
+- **Do not attempt Node.js** as alternative for bun - it won't work
 
 ## Benchmarks
-
 TODO - Complete this!!
 
-## Releasing a Dist
-
-```sh
+## Release Distribution
+```bash
 ./ci_build_v2.sh
 ```

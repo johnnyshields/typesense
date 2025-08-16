@@ -11,26 +11,21 @@ globs:
 
 ## Summary
 
-The TypeScript codebase follows modern ECMAScript standards with strict type safety and functional programming patterns. Key architectural patterns include Result types for error handling (`neverthrow`), Zod schemas for runtime validation, environment configuration with type safety, and extensive use of async/await patterns. The codebase emphasizes immutability, proper resource management with lifecycle hooks, and comprehensive type definitions using TypeScript's advanced features like generics, mapped types, and utility types.
+The Typesense TypeScript codebase follows modern ECMAScript standards with strict type safety and functional programming patterns. The architecture centers on Result types (`neverthrow`) for comprehensive error handling, Zod schemas for runtime validation at system boundaries, and type-safe environment configuration. The codebase emphasizes immutability, extensive use of async/await patterns, proper resource management with lifecycle hooks, and leverages TypeScript's advanced type system features throughout.
 
 ## File Organization
 
-### File Extensions and Structure
+### Extensions & Purpose
+- `.ts` - Standard TypeScript files
+- `.mts` - ES modules with TypeScript
+- `.js`/`.mjs` - Only when TypeScript not applicable
+- **Directory naming**: `kebab-case` (e.g., `typesense-process/`)
+- **File naming**: `kebab-case` (e.g., `error-handling.ts`)
 
-- Use `.ts` for TypeScript files
-- Use `.mts` for ES modules with TypeScript
-- Use `.js`/`.mjs` only when TypeScript is not applicable
-- Organize files in logical directories with clear separation of concerns
-
-### Import/Export Patterns
-
-- Use ES6 import/export syntax exclusively
-- Group imports by category with blank lines between groups
-- Use path aliases for cleaner imports
-
+### Import Structure (Order Matters!)
 ```typescript
-// 1. Node.js built-in modules
-import { rmSync, mkdirSync, existsSync } from "node:fs";
+// 1. Node.js built-in modules (use node: prefix)
+import { rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 // 2. Third-party packages
@@ -38,7 +33,7 @@ import { z } from "zod";
 import { env } from "bun";
 import { ResultAsync } from "neverthrow";
 
-// 3. Internal modules (with path aliases)
+// 3. Internal modules (use path aliases @/)
 import type { ErrorWithMessage } from "@/error";
 import { toErrorWithMessage } from "@/error";
 import { TypesenseProcessManager } from "@/typesense-process";
@@ -46,33 +41,32 @@ import { TypesenseProcessManager } from "@/typesense-process";
 
 ## Naming Conventions
 
-### Variables and Functions
-
-- **camelCase** for variables, functions, and methods
-- Use descriptive names that clearly indicate purpose
-- Prefer verbs for functions and nouns for variables
+### Variables/Functions
+- **camelCase** throughout
+- Verbs for functions, nouns for variables
+- Boolean variables prefixed with `is`, `has`, `should`
 
 ```typescript
 const typesenseManager = new TypesenseProcessManager();
 const baseDir = env.TYPESENSE_DATA_DIR;
 let serverProcess: ServerProcess | null = null;
+const isReady = true;
+const hasConnection = false;
 
 async function startTypesenseServer(): Promise<ServerConfig> { }
 function getErrorMessage(error: unknown): string { }
 ```
 
-### Types, Interfaces, and Classes
-
-- **PascalCase** for classes, interfaces, types, and enums
-- Prefix interfaces with descriptive context (not "I" prefix)
-- Use descriptive names for generic type parameters
+### Types/Interfaces/Classes
+- **PascalCase** for all
+- **NO "I" prefix** for interfaces
+- Descriptive generic parameters (not just T)
+- Enum values match their purpose format
 
 ```typescript
-class TypesenseProcessManager {
-  constructor() { }
-}
+class TypesenseProcessManager { }
 
-interface ServerInstance {
+interface ServerInstance {  // Not IServerInstance
   process: Bun.Subprocess;
   name: string;
   port: number;
@@ -83,162 +77,38 @@ type ErrorWithMessage = {
 };
 
 enum ProcessState {
-  Starting = "starting",
+  Starting = "starting",  // lowercase string values
   Running = "running",
   Stopped = "stopped"
 }
+
+// Descriptive generics
+interface Result<TData, TError = Error> { }
+function processData<TInput extends Record<string, unknown>>(
+  data: TInput
+): Promise<ProcessedData<TInput>> { }
 ```
 
-### Constants and Configuration
-
+### Constants
 - **SCREAMING_SNAKE_CASE** for module-level constants
-- **camelCase** for object properties and local constants
-- Group related constants in objects or enums
+- **camelCase** for object properties
+- Use `as const` for literal types
 
 ```typescript
 const MAX_RETRY_ATTEMPTS = 3;
 const DEFAULT_TIMEOUT_MS = 30000;
 
 const serverConfig = {
-  maxConnections: 100,
+  maxConnections: 100,      // camelCase properties
   retryInterval: 5000,
   enableAnalytics: true,
-} as const;
+} as const;  // Makes it readonly with literal types
 ```
 
-### Files and Directories
+## Critical Patterns
 
-- **kebab-case** for file and directory names
-- Use descriptive names that indicate file purpose
-- Group related files in directories
-
-```dir
-src/
-  services/
-    typesense-process.ts
-    docker.ts
-  utils/
-    error-handling.ts
-    base.ts
-  commands/
-    benchmark.ts
-    install.ts
-```
-
-## Type Definitions
-
-### Type Annotations
-
-- Always provide explicit return types for functions
-- Use type annotations for complex variable declarations
-- Leverage TypeScript's type inference for simple cases
-
-```typescript
-// Explicit return type
-async function fetchServerConfig(): Promise<ServerConfig> {
-  return await loadConfig();
-}
-
-// Type annotation for complex variables
-const processMap: Map<string, ServerInstance> = new Map();
-
-// Let TypeScript infer simple types
-const isReady = true;
-const serverName = "typesense-1";
-```
-
-### Interface and Type Definitions
-
-- Prefer `interface` for object shapes that might be extended
-- Use `type` for unions, intersections, and computed types
-- Use `readonly` for immutable properties
-
-```typescript
-interface ServerConfig {
-  readonly name: string;
-  readonly port: number;
-  timeout?: number;
-}
-
-type ProcessState = "starting" | "running" | "stopped";
-type ServerInstance = ServerConfig & {
-  process: Bun.Subprocess;
-};
-```
-
-### Generic Types
-
-- Use descriptive names for generic parameters
-- Provide constraints when appropriate
-- Use default type parameters when useful
-
-```typescript
-interface Result<TData, TError = Error> {
-  data?: TData;
-  error?: TError;
-}
-
-function processData<T extends Record<string, unknown>>(
-  data: T
-): Promise<ProcessedData<T>> {
-  // Implementation
-}
-```
-
-## Function and Method Design
-
-### Function Declarations
-
-- Use `async/await` for asynchronous operations
-- Prefer arrow functions for short, simple operations
-- Use function declarations for named functions that might be hoisted
-
-```typescript
-// Named function declaration
-function calculateScore(metrics: Metrics): number {
-  return metrics.accuracy * metrics.speed;
-}
-
-// Arrow function for simple operations
-const formatMessage = (message: string): string => message.trim().toLowerCase();
-
-// Async function
-async function startServer(config: ServerConfig): Promise<void> {
-  await initializeDatabase();
-  await startHttpServer(config);
-}
-```
-
-### Parameter Patterns
-
-- Use object parameters for functions with many options
-- Provide default values and make optional parameters explicit
-- Use destructuring for cleaner parameter handling
-
-```typescript
-interface StartServerOptions {
-  port?: number;
-  enableCors?: boolean;
-  maxConnections?: number;
-}
-
-async function startServer({
-  port = 3000,
-  enableCors = true,
-  maxConnections = 100
-}: StartServerOptions = {}): Promise<void> {
-  // Implementation
-}
-```
-
-## Error Handling
-
-### Result Pattern with neverthrow
-
-- Use `Result<T, E>` types for operations that can fail
-- Chain operations with `.map()`, `.mapErr()`, and `.andThen()`
-- Handle both success and error cases explicitly
-
+### Result Pattern (neverthrow)
+**Used extensively for error handling**
 ```typescript
 import { Result, ok, err, ResultAsync } from "neverthrow";
 
@@ -252,21 +122,72 @@ async function loadConfig(path: string): Promise<Result<Config, ConfigError>> {
   }
 }
 
-// Usage
+// Usage - always check isOk() first
 const configResult = await loadConfig("./config.json");
 if (configResult.isOk()) {
   console.log("Config loaded:", configResult.value);
 } else {
   console.error("Config error:", configResult.error.message);
 }
+
+// Chaining operations
+const result = await loadConfig("./config.json")
+  .map(config => transformConfig(config))
+  .mapErr(error => new CustomError(error))
+  .andThen(config => validateConfig(config));
 ```
 
-### Error Types and Messages
+### Zod Runtime Validation
+**Always validate external data at boundaries**
+```typescript
+import { z } from "zod";
 
-- Create specific error types for different error categories
-- Provide meaningful error messages with context
-- Use type guards for error checking
+const ServerConfigSchema = z.object({
+  name: z.string().min(1),
+  port: z.number().int().positive(),
+  enableAnalytics: z.boolean().default(false),
+  features: z.array(z.string()).optional(),
+});
 
+// Infer TypeScript type from schema
+type ServerConfig = z.infer<typeof ServerConfigSchema>;
+
+function validateConfig(data: unknown): ServerConfig {
+  return ServerConfigSchema.parse(data);  // Throws on invalid
+}
+
+// Safe parsing
+const result = ServerConfigSchema.safeParse(data);
+if (result.success) {
+  // result.data is typed
+} else {
+  // result.error has validation errors
+}
+```
+
+### Environment Configuration
+**Type-safe env vars with validation**
+```typescript
+import { createEnv } from "@t3-oss/env-core";
+
+const env = createEnv({
+  server: {
+    DATABASE_URL: z.string().url(),
+    PORT: z.number().default(3000),
+    NODE_ENV: z.enum(["development", "production", "test"]),
+  },
+  client: {
+    API_BASE_URL: z.string().url(),
+  },
+  runtimeEnv: process.env,
+  skipValidation: process.env.NODE_ENV === "test",
+});
+
+// Usage - fully typed
+const port = env.PORT;  // number
+```
+
+### Error Type Guards
 ```typescript
 interface ErrorWithMessage {
   message: string;
@@ -283,54 +204,88 @@ function isErrorWithMessage(error: unknown): error is ErrorWithMessage {
 
 function toErrorWithMessage(error: unknown): ErrorWithMessage {
   if (isErrorWithMessage(error)) return error;
-
-  if (typeof error === "string") {
-    return new Error(error);
-  }
-
+  if (typeof error === "string") return new Error(error);
   return new Error(JSON.stringify(error));
 }
 ```
 
-## Async Programming
-
-### Promise Patterns
-
-- Always use `async/await` instead of `.then()/.catch()`
-- Handle Promise rejections with proper error handling
-- Use `Promise.all()` for concurrent operations
-
+### Function Parameter Objects
+**For functions with many options**
 ```typescript
-// Good: async/await pattern
+interface StartServerOptions {
+  port?: number;
+  enableCors?: boolean;
+  maxConnections?: number;
+}
+
+async function startServer({
+  port = 3000,
+  enableCors = true,
+  maxConnections = 100
+}: StartServerOptions = {}): Promise<void> {
+  // Note the = {} default for entire object
+}
+```
+
+## Type Annotations
+
+### Function Return Types
+**ALWAYS provide explicit return types**
+```typescript
+// Good - explicit return type
+async function fetchData(): Promise<Data[]> { }
+function calculate(x: number): number { }
+
+// Bad - relying on inference
+async function fetchData() { }  // Don't do this
+```
+
+### Type vs Interface
+```typescript
+// Interface - for object shapes that might be extended
+interface ServerConfig {
+  readonly name: string;  // Use readonly for immutability
+  readonly port: number;
+  timeout?: number;
+}
+
+// Type - for unions, intersections, computed
+type ProcessState = "starting" | "running" | "stopped";
+type ServerInstance = ServerConfig & { process: Subprocess };
+type KeysOf<T> = keyof T;
+```
+
+## Async/Resource Management
+
+### Async Patterns
+```typescript
+// Always async/await, never .then()
 async function processMultipleItems(items: Item[]): Promise<ProcessedItem[]> {
   try {
+    // Concurrent operations with Promise.all
     const results = await Promise.all(
       items.map(item => processItem(item))
     );
     return results;
   } catch (error) {
-    throw new ProcessingError(`Failed to process items: ${error.message}`);
+    throw new ProcessingError(`Failed: ${error.message}`);
   }
 }
 ```
 
-### Resource Management
-
-- Use proper cleanup patterns for resources
-- Implement lifecycle management with setup/teardown
-- Handle process signals for graceful shutdown
-
+### Lifecycle Management
 ```typescript
 class ResourceManager {
   private resources: Resource[] = [];
 
   async initialize(): Promise<void> {
-    // Setup resources
+    // Setup signal handlers for cleanup
     process.on("SIGTERM", () => this.cleanup());
     process.on("SIGINT", () => this.cleanup());
   }
 
   async cleanup(): Promise<void> {
+    // Parallel cleanup
     await Promise.all(
       this.resources.map(resource => resource.dispose())
     );
@@ -338,117 +293,49 @@ class ResourceManager {
 }
 ```
 
-## Code Organization
+## Module Patterns
 
-### Class Design
-
-- Use classes for stateful objects and services
-- Implement proper encapsulation with private/public modifiers
-- Use readonly for immutable properties
-
+### Named Exports (Preferred)
 ```typescript
-class TypesenseProcessManager {
-  private readonly baseDir: string;
-  private readonly binaryPath: string;
-  private processes: Map<string, ServerInstance> = new Map();
-
-  constructor(baseDir: string, binaryPath: string) {
-    this.baseDir = baseDir;
-    this.binaryPath = binaryPath;
-  }
-
-  async startProcess(name: string): Promise<void> {
-    // Implementation
-  }
-
-  private installSignalHandlers(): void {
-    // Private helper method
-  }
-}
-```
-
-### Module Patterns
-
-- Export specific functions/classes rather than using default exports
-- Use namespace imports for utility modules
-- Provide clear public APIs for modules
-
-```typescript
-// Good: named exports
+// Good - named exports
 export class ProcessManager { }
 export function startServer() { }
-export type { ServerConfig };
+export type { ServerConfig };  // Type-only export
 
 // Usage
 import { ProcessManager, startServer, type ServerConfig } from "./server";
 ```
 
-## Validation and Schema
-
-### Zod for Runtime Validation
-
-- Define schemas for external data (APIs, config files, environment)
-- Use schema inference for TypeScript types
-- Validate data at boundaries (network, file system)
-
-```typescript
-import { z } from "zod";
-
-const ServerConfigSchema = z.object({
-  name: z.string().min(1),
-  port: z.number().int().positive(),
-  enableAnalytics: z.boolean().default(false),
-  features: z.array(z.string()).optional(),
-});
-
-type ServerConfig = z.infer<typeof ServerConfigSchema>;
-
-function validateConfig(data: unknown): ServerConfig {
-  return ServerConfigSchema.parse(data);
-}
-```
-
-### Environment Configuration
-
-- Use dedicated libraries for environment variable validation
-- Provide type-safe environment configuration
-- Set sensible defaults for development/testing
-
-```typescript
-import { createEnv } from "@t3-oss/env-core";
-
-const env = createEnv({
-  server: {
-    DATABASE_URL: z.string().url(),
-    PORT: z.number().default(3000),
-  },
-  client: {
-    API_BASE_URL: z.string().url(),
-  },
-  runtimeEnv: process.env,
-});
-```
+### Avoid Default Exports
+Default exports make refactoring harder and have poor IDE support.
 
 ## Best Practices
 
-### General Guidelines
+### Critical Rules
+1. **Strict mode**: Always use strict TypeScript config
+2. **No `any`**: Use `unknown` with type guards instead
+3. **Immutability**: `const` over `let`, `readonly` properties
+4. **Type-only imports**: Use `import type` when possible
+5. **Error boundaries**: Handle Promise rejections properly
+6. **Resource cleanup**: Always implement cleanup in lifecycle hooks
 
-1. **Strict Mode**: Always use strict TypeScript configuration
-2. **Immutability**: Prefer `const` over `let`, use `readonly` for object properties
-3. **Type Safety**: Avoid `any` type, use proper type assertions with type guards
-4. **Documentation**: Use TSDoc comments for public APIs
-5. **Testing**: Write comprehensive tests with proper type coverage
+### Performance
+- Use `satisfies` operator for type-safe literals without widening
+- Lazy evaluation for expensive computations
+- Type predicates over type assertions
+- `as const` for precise literal types
 
-### Performance Considerations
-
-- Use `as const` for constant objects to enable precise typing
-- Prefer type predicates over type assertions
-- Use lazy evaluation for expensive computations
-- Consider using `satisfies` operator for type-safe object literals
+### Modern Features Used
+- Optional chaining `?.`
+- Nullish coalescing `??`
+- Template literal types
+- Conditional types
+- Mapped types
+- Utility types (Partial, Required, Pick, Omit, etc.)
 
 ### Code Quality
-
-- Enable strict linting rules (ESLint, Prettier)
-- Use consistent formatting and naming conventions
-- Write self-documenting code with clear variable and function names
-- Keep functions small and focused on single responsibilities
+- ESLint with strict rules
+- Prettier for formatting
+- TSDoc comments for public APIs
+- Self-documenting code with clear names
+- Small, focused functions (single responsibility)

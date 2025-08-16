@@ -7,65 +7,94 @@ globs:
 
 # Testing Philosophy
 
-## Core Testing Principles
+## Core Principles
 
 ### Mission-Oriented Testing
+- Each test focuses on **ONE specific behavior**
+- Multiple sequential steps/assertions OK if testing one cohesive flow
+- Test names must clearly describe expected behavior
+- Avoid unrelated functionality in single test
 
-- Each test case should focus on **one specific behavior or functionality**. However, you may include multiple sequential steps and assertions in one test case.
-- Test names must clearly describe the expected behavior being verified
-- Avoid testing multiple unrelated functionalities in a single test
+### Comprehensive Path Coverage
+- **ALWAYS test both success AND failure paths**
+- Create **separate, dedicated tests** for each error condition
+- Verify **specific error codes and messages** for failures
+- Don't combine multiple error scenarios in one test
 
-### Comprehensive Path Testing
+### No Conditional Logic in Tests
+- **NEVER use if/try-catch for conditional testing**
+- Each code branch needs its own dedicated test
+- Tests must have **deterministic, linear execution**
+- No dynamic test generation or conditional assertions
 
-- **Always test both success paths and failure scenarios** for every function
-- Create separate, dedicated tests for each error condition rather than combining them
-- Verify specific error codes and messages for failure cases
+### Real Objects Over Mocks
+- **Strongly prefer real implementations** over mocks
+- Instantiate actual objects to test genuine behavior
+- Only mock what's truly necessary:
+  - External network services
+  - File systems (when expensive)
+  - Time-dependent operations
+- Keep mocks simple and behavior-focused
 
-### Avoid Conditional Testing Logic
+## Required Test Coverage
 
-- **Never use if/try-catch statements for conditional testing within test functions**
-- If multiple branches need testing, create separate tests for each branch
-- Each test should follow a linear execution path with deterministic assertions
+### Input Validation
+- **All invalid combinations**: wrong types, missing fields, empty values
+- **Boundary conditions**: min/max values, size limits, edge cases
+- **Malformed data**: unexpected formats, corrupt data
+- **Type mismatches**: string where number expected, etc.
 
-### Prefer Real Objects Over Mocks
+### Resource & State Management
+- **Cleanup verification**: resources properly released
+- **State transitions**: valid and invalid state changes
+- **Empty/missing scenarios**: empty collections, missing files
+- **Concurrent access**: race conditions, deadlocks
+- **Network failures**: timeouts, connection drops
 
-- **Avoid mocking when possible** - instantiate real objects rather than using mock frameworks
-- Use actual implementations to test genuine integration and behavior
-- Only mock external dependencies that are expensive, slow, or unavailable (network services, file systems)
-- When mocking is necessary, keep mocks simple and focused on specific behaviors
-
-## Edge Case and Error Testing
-
-### Comprehensive Input Validation
-
-- Test **all invalid input combinations** (wrong types, missing fields, empty values)
-- Verify boundary conditions (min/max values, size limits)
-- Test malformed data and unexpected formats
-
-### Resource and State Testing
-
-- Test resource cleanup and proper state management
-- Verify behavior with empty collections, missing files, network failures
-- Test concurrent access scenarios where applicable
+### Integration Points
+- **Full lifecycle**: create → modify → use → delete
+- **Persistence**: data survives restarts
+- **Cross-component**: interactions between modules
+- **System boundaries**: API contracts, external services
 
 ## Test Organization
 
-### File and Directory Structure
-
-- Follow the same directory structure as the source code
-- Group related tests in the same fixture/describe block
-- Use descriptive test names that explain the expected behavior
+### Directory Structure
+- **Mirror source structure**: test files parallel source files
+- **Fixture organization**: group related tests in same fixture/describe
+- **Clear naming**: describe what's being tested, not how
 
 ### Test Data Management
+- **Fixture files**: Store in `resources/` directories
+- **Cleanup mandatory**: Remove temp files/dirs after tests
+- **Deterministic data**: Avoid random generation unless testing randomness
+- **Separate scenarios**: Different data files for different test cases
+- **Unique temp paths**: Prevent test interference
 
-- Use fixture files in appropriate `resources/` directories for test data
-- Clean up temporary files and directories after tests
-- Use deterministic test data rather than random generation where possible
-- Create separate test data files for different test scenarios
+### Performance & Load Testing
+- **Critical path benchmarks**: Measure key operations
+- **Load testing**: Behavior under stress
+- **Resource limits**: Memory, CPU, file handles
+- **Degradation testing**: Graceful failure modes
+- **Recovery testing**: System recovery after failures
 
-### Performance and Integration Testing
+## Anti-Patterns to Avoid
 
-- Include performance benchmarks for critical path operations
-- Test integration points between major components
-- Verify system behavior under load and stress conditions
-- Test failure recovery and graceful degradation scenarios
+### Common Mistakes
+- Testing multiple behaviors in one test
+- Skipping error path testing
+- Using production data in tests
+- Not cleaning up resources
+- Conditional assertions based on environment
+- Testing implementation details vs behavior
+- Overly complex test setup
+
+### Test Smells
+- Tests that sometimes pass/fail (flaky)
+- Tests requiring specific order
+- Tests modifying shared state
+- Tests with no assertions
+- Tests testing the test framework
+- Copy-pasted test code without understanding
+- Tests that take too long to run
+- Tests coupled to implementation details

@@ -6,42 +6,14 @@ globs:
 
 # C++ Testing Standards
 
-## Environment
+## Environment Setup
 
 ### Directory Structure
-
-- `/test/` - All C++ tests are here.
-
-### Fixture Files
-
-- Store test data in `test/resources/` directory
-- Use descriptive filenames: `documents.jsonl`, `invalid_config.ini`
-- Clean up generated files in `TearDown()` methods
-
-### Temporary Directories
-
-- Use `/tmp/typesense_test/` prefix for temporary test directories
-- Clean up using `system()` calls or proper RAII cleanup
-- Create unique directory names per test to avoid conflicts
-
-```cpp
-void SetUp() override {
-    std::string state_dir_path = "/tmp/typesense_test/collection_test_db";
-    system(("rm -rf " + state_dir_path + " && mkdir -p " + state_dir_path).c_str());
-
-    store = new Store(state_dir_path);
-}
-```
-
-## Testing Frameworks
+- `/test/` - All C++ unit tests
+- `/test/resources/` - Test data files (JSONLines, configs, fixtures)
+- `/tmp/typesense_test/` - Temporary test directories (auto-cleaned)
 
 ### Google Test Framework
-
-- Use **Google Test** (`gtest`) framework for all C++ unit tests
-- Create test fixture classes inheriting from `::testing::Test` for related tests
-- Use `TEST_F` for fixture-based tests and `TEST` for standalone tests
-- Implement proper `SetUp()` and `TearDown()` methods for resource management
-
 ```cpp
 class AuthManagerTest : public ::testing::Test {
 protected:
@@ -49,124 +21,257 @@ protected:
     AuthManager auth_manager;
 
     void SetUp() override {
+        // Always use unique paths to prevent interference
         std::string state_dir_path = "/tmp/typesense_test/auth_manager_test_db";
+        
+        // Clean slate - rm -rf then mkdir
         system(("rm -rf " + state_dir_path + " && mkdir -p " + state_dir_path).c_str());
-
+        
         store = new Store(state_dir_path);
         auth_manager.init(store, "bootstrap-key");
     }
 
     void TearDown() override {
         delete store;
+        // Directory cleanup happens in next SetUp
     }
 };
 ```
 
-## Test Naming Conventions
+### Test Fixtures
+- Use `TEST_F` for fixture-based tests (most common)
+- Use `TEST` for standalone tests (rare)
+- Fixtures provide consistent setup/teardown
+- Share common initialization across related tests
 
-- Test class names: `ClassNameTest`
-- Test method names: `MethodName_Scenario_ExpectedBehavior`
-- Use descriptive names that clearly indicate what is being tested
+## Naming Conventions
 
+### Test Class Names
 ```cpp
-TEST_F(AuthManagerTest, CreateAPIKey_ValidInput_ReturnsSuccess) { ... }
-TEST_F(AuthManagerTest, CreateAPIKey_DuplicateKey_ReturnsConflictError) { ... }
-TEST_F(CollectionTest, AddDocument_EmptyPayload_ReturnsValidationError) { ... }
+ClassNameTest  // Append "Test" to class being tested
+```
+
+### Test Method Names
+```cpp
+// Pattern: MethodName_Scenario_ExpectedBehavior
+TEST_F(AuthManagerTest, CreateAPIKey_ValidInput_ReturnsSuccess) { }
+TEST_F(AuthManagerTest, CreateAPIKey_DuplicateKey_ReturnsConflictError) { }
+TEST_F(CollectionTest, AddDocument_EmptyPayload_ReturnsValidationError) { }
+TEST_F(CollectionTest, Search_WithTypo_ReturnsCorrection) { }
 ```
 
 ## Assertion Patterns
 
-### Result Validation with Option<T>
-
-- Use `ASSERT_TRUE(result.ok())` for success cases
-- Use `ASSERT_FALSE(result.ok())` for failure cases
-- Always verify specific error codes: `ASSERT_EQ(expected_code, result.code())`
-- Validate error messages: `ASSERT_EQ("Expected message", result.error())`
+### Option<T> Result Testing
+**The codebase uses Option<T> extensively - always test both paths**
 
 ```cpp
+// Success case - verify ok() and get value
 TEST_F(AuthManagerTest, CreateAPIKey_ValidInput_ReturnsSuccess) {
     api_key_t api_key("valid_key", "description", {"read"}, {"collection1"}, FUTURE_TS);
     auto result = auth_manager.create_key(api_key);
-
+    
     ASSERT_TRUE(result.ok());
     ASSERT_EQ("valid_key", result.get().value);
+    ASSERT_EQ("description", result.get().description);
 }
 
+// Failure case - verify !ok(), error code, and message
 TEST_F(AuthManagerTest, CreateAPIKey_DuplicateKey_ReturnsConflictError) {
     api_key_t api_key("duplicate_key", "desc", {"read"}, {"coll"}, FUTURE_TS);
     auth_manager.create_key(api_key);  // First insertion
-
+    
     auto conflict_result = auth_manager.create_key(api_key);  // Duplicate
     ASSERT_FALSE(conflict_result.ok());
-    ASSERT_EQ(409, conflict_result.code());
+    ASSERT_EQ(409, conflict_result.code());  // Always verify specific code
     ASSERT_EQ("API key generation conflict.", conflict_result.error());
 }
 ```
 
-### Value Assertions
+### Assertion Types
+```cpp
+// Fatal assertions (stop test on failure)
+ASSERT_TRUE(condition);       // Boolean checks
+ASSERT_FALSE(condition);
+ASSERT_EQ(expected, actual);  // Equality
+ASSERT_NE(val1, val2);        // Inequality
+ASSERT_LT(val1, val2);        // Less than
+ASSERT_GT(val1, val2);        // Greater than
+ASSERT_STREQ(str1, str2);     // C-string equality
+ASSERT_NEAR(val1, val2, abs_error);  // Floating point
 
-- Use `ASSERT_EQ` for exact equality comparisons
-- Use `ASSERT_STREQ` for C-style string comparisons
-- Use `EXPECT_*` variants when test should continue after assertion failure
-- Use `ASSERT_*` variants when test should stop after assertion failure
+// Non-fatal assertions (continue test)
+EXPECT_TRUE(condition);   // Use when multiple checks needed
+EXPECT_EQ(expected, actual);
+```
 
 ## Error Testing Patterns
 
-### Input Validation Testing
-
-- Test all parameter combinations (missing, null, wrong type, empty)
-- Verify boundary conditions and limits
-- Test malformed JSON and invalid data formats
-
+### Comprehensive Input Validation
 ```cpp
-TEST_F(ConversationTest, ValidateModel_MissingModelName_ReturnsValidationError) {
-    nlohmann::json config_missing_name = R"({"history_collection": "store"})"_json;
-    auto result = validator.validate_model(config_missing_name);
-
+// Test each invalid input separately
+TEST_F(ConversationTest, ValidateModel_MissingModelName_ReturnsError) {
+    nlohmann::json config = R"({"history_collection": "store"})"_json;
+    auto result = validator.validate_model(config);
+    
     ASSERT_FALSE(result.ok());
     ASSERT_EQ(400, result.code());
     ASSERT_EQ("Property `model_name` is not provided or not a string.", result.error());
 }
 
-TEST_F(ConversationTest, ValidateModel_WrongDataType_ReturnsValidationError) {
-    nlohmann::json config_wrong_type = R"({"model_name": 123, "history_collection": "store"})"_json;
-    auto result = validator.validate_model(config_wrong_type);
-
+TEST_F(ConversationTest, ValidateModel_WrongDataType_ReturnsError) {
+    nlohmann::json config = R"({"model_name": 123, "history_collection": "store"})"_json;
+    auto result = validator.validate_model(config);
+    
     ASSERT_FALSE(result.ok());
     ASSERT_EQ(400, result.code());
+    // Different error for wrong type
+}
+
+TEST_F(ConversationTest, ValidateModel_EmptyModelName_ReturnsError) {
+    nlohmann::json config = R"({"model_name": "", "history_collection": "store"})"_json;
+    auto result = validator.validate_model(config);
+    
+    ASSERT_FALSE(result.ok());
+    ASSERT_EQ(400, result.code());
+    // Different error for empty string
 }
 ```
 
-### Resource Management Testing
+### Testing Categories
 
-- Test proper cleanup of resources (memory, file handles, network connections)
-- Verify behavior under resource exhaustion
-- Test concurrent access and thread safety where applicable
+#### Boundary Conditions
+```cpp
+TEST_F(CollectionTest, AddDocument_MaxFieldSize_Success) {
+    std::string max_size_content(1024 * 1024, 'a');  // 1MB string
+    // Test succeeds at limit
+}
+
+TEST_F(CollectionTest, AddDocument_OverMaxFieldSize_ReturnsError) {
+    std::string over_size_content(1024 * 1024 + 1, 'a');  // 1MB + 1 byte
+    // Test fails over limit
+}
+```
+
+#### Resource Management
+```cpp
+TEST_F(StoreTest, ConcurrentWrites_NoDataCorruption) {
+    std::vector<std::thread> threads;
+    for(int i = 0; i < 10; i++) {
+        threads.emplace_back([this, i]() {
+            store->write(std::to_string(i), "data");
+        });
+    }
+    for(auto& t : threads) t.join();
+    
+    // Verify all writes succeeded and data intact
+}
+```
+
+#### State Transitions
+```cpp
+TEST_F(CollectionTest, Delete_AfterCreate_Success) {
+    // Create collection
+    auto create_result = manager.create_collection(schema);
+    ASSERT_TRUE(create_result.ok());
+    
+    // Delete collection
+    auto delete_result = manager.delete_collection("test");
+    ASSERT_TRUE(delete_result.ok());
+    
+    // Verify collection no longer exists
+    auto get_result = manager.get_collection("test");
+    ASSERT_FALSE(get_result.ok());
+    ASSERT_EQ(404, get_result.code());
+}
+```
 
 ## Integration Testing
 
-### Collection Manager Testing
+### Full Lifecycle Testing
+```cpp
+TEST_F(CollectionManagerTest, FullLifecycle_CreateIndexSearchDelete) {
+    // 1. Create collection
+    auto create_op = manager.create_collection(schema);
+    ASSERT_TRUE(create_op.ok());
+    
+    // 2. Add documents
+    for(const auto& doc : test_documents) {
+        auto add_op = collection->add(doc);
+        ASSERT_TRUE(add_op.ok());
+    }
+    
+    // 3. Search documents
+    auto search_op = collection->search("query", {"field"}, "", {});
+    ASSERT_TRUE(search_op.ok());
+    ASSERT_GT(search_op.get()["hits"].size(), 0);
+    
+    // 4. Delete collection
+    auto delete_op = manager.delete_collection("test");
+    ASSERT_TRUE(delete_op.ok());
+}
+```
 
-- Test full lifecycle: create collection → add documents → search → delete
-- Verify persistence across restarts
-- Test multi-collection operations
-
-### HTTP API Testing
-
-- Test complete request/response cycles
-- Verify proper error handling and status codes
-- Test authentication and authorization flows
+### Persistence Testing
+```cpp
+TEST_F(CollectionManagerTest, DataPersistence_AcrossRestarts) {
+    // Create and populate
+    {
+        CollectionManager manager1(store);
+        manager1.create_collection(schema);
+        manager1.get_collection("test")->add(document);
+    }  // Destructor called
+    
+    // Reload and verify
+    {
+        CollectionManager manager2(store);
+        auto collection = manager2.get_collection("test");
+        ASSERT_TRUE(collection.ok());
+        ASSERT_EQ(1, collection.get()->get_num_documents());
+    }
+}
+```
 
 ## Performance Testing
 
-### Benchmarking
+### Benchmarking Critical Operations
+```cpp
+TEST_F(CollectionPerfTest, Search_LargeDataset_MeetsLatencyTarget) {
+    // Setup: Load 100k documents
+    load_test_dataset(100000);
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    auto result = collection->search("test query", {"text"}, "", {});
+    auto end = std::chrono::high_resolution_clock::now();
+    
+    auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    
+    ASSERT_TRUE(result.ok());
+    ASSERT_LT(duration_ms, 100);  // Must complete within 100ms
+}
+```
 
-- Include performance tests for critical operations
-- Use consistent test data sizes for reproducible results
-- Set reasonable performance thresholds and verify them
+## Common Test Data
 
-### Memory Testing
+### Using JSON Literals
+```cpp
+nlohmann::json test_doc = R"({
+    "id": "1",
+    "title": "Test Document",
+    "points": 100,
+    "tags": ["test", "example"]
+})"_json;  // Note the _json suffix for parsing
+```
 
-- Monitor memory usage during bulk operations
-- Test for memory leaks in long-running operations
-- Verify proper cleanup of large data structures
+### Loading Fixture Files
+```cpp
+std::string docs_jsonl = read_file("test/resources/documents.jsonl");
+std::vector<nlohmann::json> documents;
+std::istringstream iss(docs_jsonl);
+std::string line;
+while(std::getline(iss, line)) {
+    if (!line.empty()) {  // Skip empty lines
+        documents.push_back(nlohmann::json::parse(line));
+    }
+}
+```

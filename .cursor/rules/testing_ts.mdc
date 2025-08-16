@@ -8,26 +8,16 @@ globs:
 
 # TypeScript Testing Standards
 
-## Environment
+## Environment Overview
 
-### Directory Structure
+### Directory Purposes
+- `/tests/` - Shared testing infrastructure package (utilities, server management, mocks)
+- `/api_tests/` - API integration tests using Bun Test (imports from `/tests/`)
+- `/benchmark/` - Performance tests using Vitest (imports from `/tests/`)
 
-- `/tests/` - Shared testing infrastructure package that provides utilities, server management, and mocks
-- `/api_tests/` - API integration tests using Bun Test that import from `/tests/` for setup
-- `/benchmark/` - Performance tests using Vitest that import from `/tests/` for infrastructure
+### Critical Setup Requirements
 
-### Test Fixtures and Data
-
-- Store test data in appropriate directories (`artifacts/`, `resources/`)
-- Use JSON/JSONL files for structured test data
-- Clean up temporary files and directories after tests
-
-### Environment Configuration
-
-- Use environment variables for test configuration
-- Validate environment setup with Zod schemas
-- Provide sensible defaults for test environments
-
+#### Environment Configuration
 ```typescript
 import { createEnv } from "@t3-oss/env-core";
 import { z } from "zod";
@@ -39,99 +29,107 @@ const testEnv = createEnv({
     TYPESENSE_NUM_DIM: z.number().default(256),
   },
   runtimeEnv: process.env,
-  skipValidation: process.env.NODE_ENV === "test",
+  skipValidation: process.env.NODE_ENV === "test",  // Skip in test mode
 });
 ```
 
-### Process and Resource Management
-
-- Properly start and stop external processes (Typesense server, OpenAI proxy)
-- Use proper lifecycle hooks (`beforeAll`, `afterAll`)
-- Handle process cleanup gracefully, even on test failures
-
+#### Process Management Pattern
+**Always cleanup even on test failure**
 ```typescript
 let serverProcess: ServerProcess | null = null;
 
 beforeAll(async () => {
   serverProcess = await startTypesenseServer();
+  // Wait for server ready
+  await waitForServerReady(serverProcess.port);
 });
 
 afterAll(async () => {
+  // Cleanup even if tests fail
   if (serverProcess) {
     await serverProcess.cleanup();
   }
 });
 ```
 
-## Testing Frameworks
+## Framework-Specific Patterns
 
 ### Bun Test (api_tests)
-
-- Use Bun's built-in test runner for API tests
-- Import test functions: `import { describe, it, expect } from "bun:test"`
-- Organize tests with `describe` blocks for grouping related tests
-- Use `it` for individual test cases
+**Bun's built-in test runner - fast, TypeScript-native**
 
 ```typescript
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 
 describe("Collections API", () => {
-  it("should create a collection with valid schema", async () => {
+  let serverPort: number;
+  
+  beforeAll(async () => {
+    const server = await startTypesenseServer();
+    serverPort = server.port;
+  });
+  
+  it("should create collection with valid schema", async () => {
     const res = await fetchSingleNode("/collections", {
       method: "POST",
       body: JSON.stringify({
         name: "companies",
         fields: [
-          { name: "company_name", type: "string" },
-          { name: "num_employees", type: "int32" }
+          { name: "company_name", type: "string", facet: false },
+          { name: "num_employees", type: "int32", facet: true }
         ]
       })
     });
-
+    
     expect(res.ok).toBe(true);
+    expect(res.status).toBe(201);
+  });
+  
+  // Nested describes for organization
+  describe("error handling", () => {
+    it("should reject empty collection name", async () => {
+      // Test implementation
+    });
   });
 });
 ```
 
 ### Vitest (tests, benchmark)
-
-- Use Vitest for unit and integration tests
-- Import test functions: `import { test, expect, beforeAll, afterAll } from "vitest"`
-- Use `beforeAll`/`afterAll` for setup and teardown
-- Use `test` for individual test cases
+**Vite-powered test runner with great DX**
 
 ```typescript
-import { test, expect, beforeAll, afterAll } from "vitest";
+import { test, expect, beforeAll, afterAll, describe } from "vitest";
 
 beforeAll(async () => {
-  // Setup resources
   const res = await startTypesenseServer();
   if (res.isErr()) {
-    throw new Error(res.error.message);
+    throw new Error(res.error.message);  // Fail fast on setup error
   }
 });
 
 afterAll(async () => {
-  // Cleanup resources
   await closeDownTypesenseServer();
 });
 
-test("should handle conversation rotation", async () => {
-  // Test implementation
+describe("Conversation Management", () => {
+  test("should handle conversation rotation", async () => {
+    // Test implementation
+  });
+  
+  test.concurrent("can run in parallel", async () => {
+    // Parallel test execution
+  });
 });
 ```
 
 ## Assertion Patterns
 
-### Response Validation
-
-- Always verify HTTP response status: `expect(res.ok).toBe(true)`
-- Use Zod schemas for response validation instead of manual object checking
-- Validate both successful and error responses
+### Zod Schema Validation
+**Always validate API responses with schemas**
 
 ```typescript
 import { z } from "zod";
 
+// Define response schema
 const CreateCollectionResponse = z.object({
   name: z.string(),
   num_documents: z.number(),
@@ -139,124 +137,159 @@ const CreateCollectionResponse = z.object({
     name: z.string(),
     type: z.string(),
     facet: z.boolean(),
+    optional: z.boolean().optional(),
   })),
+  default_sorting_field: z.string().optional(),
 });
 
+// Test with schema validation
 test("should create collection successfully", async () => {
-  const res = await fetchSingleNode("/collections", { /* ... */ });
-
+  const res = await fetchSingleNode("/collections", {
+    method: "POST",
+    body: JSON.stringify(collectionSchema)
+  });
+  
   expect(res.ok).toBe(true);
+  
+  // Parse and validate response
   const data = CreateCollectionResponse.safeParse(await res.json());
-
+  
   expect(data.success).toBe(true);
-  expect(data.data?.name).toBe("companies");
-  expect(data.data?.num_documents).toBe(0);
+  if (data.success) {  // Type guard for TypeScript
+    expect(data.data.name).toBe("companies");
+    expect(data.data.num_documents).toBe(0);
+    expect(data.data.fields).toHaveLength(2);
+  }
 });
 ```
 
-### Error Response Testing
-
-- Test error scenarios with specific status codes and messages
-- Validate error response structure using Zod schemas
-
+### Error Response Validation
 ```typescript
 const ErrorResponse = z.object({
   message: z.string(),
   code: z.number().optional(),
+  field: z.string().optional(),  // Field that caused error
 });
 
 test("should return validation error for invalid schema", async () => {
   const res = await fetchSingleNode("/collections", {
     method: "POST",
     body: JSON.stringify({
-      name: "", // Invalid: empty name
+      name: "",  // Invalid: empty name
       fields: []
     })
   });
-
+  
   expect(res.ok).toBe(false);
   expect(res.status).toBe(400);
-
+  
   const errorData = ErrorResponse.safeParse(await res.json());
   expect(errorData.success).toBe(true);
-  expect(errorData.data?.message).toContain("Collection name");
+  
+  if (errorData.success) {
+    expect(errorData.data.message).toContain("Collection name cannot be empty");
+    expect(errorData.data.field).toBe("name");
+  }
 });
 ```
 
-## Async Testing Patterns
-
-### Promise-Based Testing
-
-- Always use `async/await` for asynchronous operations
-- Handle Promise rejections appropriately
-- Use `expect.rejects` for testing Promise rejections
-
-```typescript
-test("should handle async operations", async () => {
-  const result = await processAsyncOperation();
-  expect(result).toBeDefined();
-});
-
-test("should reject invalid input", async () => {
-  await expect(processAsyncOperation(invalidInput))
-    .rejects
-    .toThrow("Invalid input provided");
-});
-```
-
-### Result Pattern Testing
-
-- Use `neverthrow` Result types for error handling
-- Test both `Ok` and `Err` cases separately
-- Verify error messages and success values
-
+### Result Pattern Testing (neverthrow)
 ```typescript
 import { okAsync, errAsync, ResultAsync } from "neverthrow";
 
 test("should return success result", async () => {
   const result = await operationThatReturnsResult();
-
+  
   expect(result.isOk()).toBe(true);
   if (result.isOk()) {
-    expect(result.value).toEqual(expectedValue);
+    expect(result.value.id).toBeDefined();
+    expect(result.value.status).toBe("success");
   }
 });
 
 test("should return error result for invalid input", async () => {
   const result = await operationThatReturnsResult(invalidInput);
-
+  
   expect(result.isErr()).toBe(true);
   if (result.isErr()) {
     expect(result.error.message).toContain("Invalid input");
+    expect(result.error.code).toBe("VALIDATION_ERROR");
   }
+});
+
+// Testing async result chains
+test("should handle result chain", async () => {
+  const result = await fetchData()
+    .andThen(data => processData(data))
+    .map(processed => transformed(processed))
+    .mapErr(error => new CustomError(error));
+    
+  expect(result.isOk()).toBe(true);
 });
 ```
 
-## TypeScript-Specific Testing
+## Async Testing Patterns
 
-### Type Safety in Tests
-
-- Use proper TypeScript types for test data and responses
-- Leverage type inference where possible
-- Use `satisfies` operator for type-safe object literals
-
+### Promise Testing
 ```typescript
-const testData = {
-  name: "test_collection",
-  fields: [
-    { name: "id", type: "string" },
-    { name: "title", type: "string" }
-  ]
-} satisfies CollectionSchema;
+// Always use async/await
+test("should handle async operations", async () => {
+  const result = await processAsyncOperation();
+  expect(result).toBeDefined();
+  expect(result.status).toBe("completed");
+});
+
+// Test Promise rejections
+test("should reject with invalid input", async () => {
+  await expect(processAsyncOperation(invalidInput))
+    .rejects
+    .toThrow("Invalid input provided");
+});
+
+// Test specific error types
+test("should throw ValidationError", async () => {
+  await expect(validateData(badData))
+    .rejects
+    .toThrowError(ValidationError);
+});
 ```
 
-### Generic Testing Utilities
-
-- Create reusable test utilities with proper generic types
-- Use function overloads for different test scenarios
-- Maintain type safety in helper functions
-
+### Concurrent Operations
 ```typescript
+test("should handle parallel requests", async () => {
+  const operations = Array.from({ length: 10 }, (_, i) => 
+    createDocument({ id: `doc_${i}`, content: `Test ${i}` })
+  );
+  
+  const results = await Promise.all(operations);
+  
+  expect(results).toHaveLength(10);
+  results.forEach(result => {
+    expect(result.isOk()).toBe(true);
+  });
+});
+
+// Test with Promise.allSettled for partial failures
+test("should handle partial failures", async () => {
+  const operations = [
+    createDocument(validDoc),
+    createDocument(invalidDoc),
+    createDocument(validDoc2),
+  ];
+  
+  const results = await Promise.allSettled(operations);
+  
+  expect(results[0].status).toBe("fulfilled");
+  expect(results[1].status).toBe("rejected");
+  expect(results[2].status).toBe("fulfilled");
+});
+```
+
+## Test Utilities
+
+### Type-Safe Test Helpers
+```typescript
+// Generic endpoint tester with schema validation
 async function testEndpoint<T>(
   endpoint: string,
   options: RequestInit,
@@ -264,55 +297,190 @@ async function testEndpoint<T>(
 ): Promise<T> {
   const res = await fetch(endpoint, options);
   expect(res.ok).toBe(true);
-
-  const data = schema.safeParse(await res.json());
-  expect(data.success).toBe(true);
-
-  return data.data!;
+  
+  const json = await res.json();
+  const parsed = schema.safeParse(json);
+  
+  expect(parsed.success).toBe(true);
+  if (!parsed.success) {
+    throw new Error(`Schema validation failed: ${parsed.error.message}`);
+  }
+  
+  return parsed.data;
 }
+
+// Usage
+const collection = await testEndpoint(
+  "/collections",
+  { method: "POST", body: JSON.stringify(schema) },
+  CreateCollectionResponse
+);
 ```
 
-## Error Handling and Testing
-
-### Error Boundary Testing
-
-- Test error handling at component and service levels
-- Verify proper error propagation and logging
-- Test error recovery mechanisms
-
-### Network and External Dependencies
-
-- Mock external API calls appropriately
-- Test network failure scenarios
-- Verify proper timeout and retry behavior
-
+### Mock Helpers
 ```typescript
-test("should handle network timeout", async () => {
-  // Mock network delay
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error("Network timeout")), 100)
-  );
+// Mock external API calls
+function mockTypesenseAPI() {
+  return {
+    search: vi.fn().mockResolvedValue({
+      hits: [],
+      found: 0,
+      search_time_ms: 1
+    }),
+    
+    createDocument: vi.fn().mockImplementation((doc) => 
+      Promise.resolve({ id: doc.id, ...doc })
+    ),
+  };
+}
 
-  await expect(timeoutPromise).rejects.toThrow("Network timeout");
+// Mock with specific responses
+test("should handle API error", async () => {
+  const mockApi = mockTypesenseAPI();
+  mockApi.search.mockRejectedValueOnce(new Error("Network error"));
+  
+  const result = await searchWithFallback(mockApi, "query");
+  expect(result.source).toBe("cache");  // Falls back to cache
 });
 ```
 
 ## Integration Testing
 
 ### Multi-Node Testing
-
-- Test distributed Typesense cluster scenarios
-- Verify data consistency across nodes
-- Test node failure and recovery
+```typescript
+describe("Multi-node cluster", () => {
+  let nodes: ServerProcess[] = [];
+  
+  beforeAll(async () => {
+    // Start 3-node cluster
+    nodes = await Promise.all([
+      startTypesenseServer({ port: 8108 }),
+      startTypesenseServer({ port: 8109 }),
+      startTypesenseServer({ port: 8110 }),
+    ]);
+  });
+  
+  test("should replicate data across nodes", async () => {
+    // Write to node 1
+    await createDocument(nodes[0].port, doc);
+    
+    // Read from node 2 and 3
+    const doc2 = await getDocument(nodes[1].port, doc.id);
+    const doc3 = await getDocument(nodes[2].port, doc.id);
+    
+    expect(doc2).toEqual(doc);
+    expect(doc3).toEqual(doc);
+  });
+});
+```
 
 ### End-to-End Workflows
+```typescript
+test("complete user journey", async () => {
+  // 1. Create account
+  const user = await createUser({ email: "test@example.com" });
+  
+  // 2. Create collection
+  const collection = await createCollection(user.apiKey, schema);
+  
+  // 3. Import documents
+  const importResult = await bulkImport(user.apiKey, documents);
+  expect(importResult.success).toBe(documents.length);
+  
+  // 4. Search documents
+  const searchResults = await search(user.apiKey, "query");
+  expect(searchResults.hits.length).toBeGreaterThan(0);
+  
+  // 5. Cleanup
+  await deleteCollection(user.apiKey, collection.name);
+  await deleteUser(user.id);
+});
+```
 
-- Test complete user workflows from start to finish
-- Verify data persistence and state management
-- Test real-world usage patterns
+## Performance Testing
 
-### Performance Testing
+### Timing Assertions
+```typescript
+test("should meet latency requirements", async () => {
+  const start = performance.now();
+  
+  const result = await searchDocuments("test query");
+  
+  const duration = performance.now() - start;
+  
+  expect(result.hits).toBeDefined();
+  expect(duration).toBeLessThan(100);  // Must complete within 100ms
+});
+```
 
-- Include timing assertions for critical operations
-- Test with realistic data volumes
-- Monitor resource usage during tests
+### Load Testing
+```typescript
+test("should handle concurrent load", async () => {
+  const concurrentRequests = 100;
+  const requests = Array.from({ length: concurrentRequests }, () =>
+    searchDocuments("test")
+  );
+  
+  const start = performance.now();
+  const results = await Promise.all(requests);
+  const duration = performance.now() - start;
+  
+  // All requests should succeed
+  results.forEach(result => {
+    expect(result.isOk()).toBe(true);
+  });
+  
+  // Should complete within reasonable time
+  const avgLatency = duration / concurrentRequests;
+  expect(avgLatency).toBeLessThan(50);  // 50ms average
+});
+```
+
+## Best Practices
+
+### Test Isolation
+- Each test should be independent
+- Don't rely on test execution order
+- Clean up created resources in `afterEach` or `afterAll`
+- Use unique identifiers to prevent conflicts (timestamps, UUIDs)
+
+### Error Scenarios
+```typescript
+describe("Network error handling", () => {
+  test("should retry on timeout", async () => {
+    let attempts = 0;
+    const mockFetch = vi.fn().mockImplementation(() => {
+      attempts++;
+      if (attempts < 3) {
+        return Promise.reject(new Error("Timeout"));
+      }
+      return Promise.resolve({ ok: true });
+    });
+    
+    const result = await fetchWithRetry(mockFetch, "/endpoint");
+    
+    expect(attempts).toBe(3);
+    expect(result.ok).toBe(true);
+  });
+});
+```
+
+### Type Safety in Tests
+```typescript
+// Use satisfies for test data
+const testDoc = {
+  id: "test_1",
+  title: "Test Document",
+  content: "Test content",
+} satisfies DocumentSchema;
+
+// Type-safe test fixtures
+function createTestDocument(overrides?: Partial<Document>): Document {
+  return {
+    id: "test_doc",
+    title: "Test",
+    content: "Content",
+    created_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
