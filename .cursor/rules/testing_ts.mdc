@@ -1,0 +1,312 @@
+---
+description: TypeScript/JavaScript testing standards
+globs:
+  - "api_tests/**"
+  - "tests/**"
+  - "benchmark/**"
+---
+
+# TypeScript Testing Standards
+
+## Testing Frameworks
+
+### Bun Test (api_tests)
+
+- Use Bun's built-in test runner for API tests
+- Import test functions: `import { describe, it, expect } from "bun:test"`
+- Organize tests with `describe` blocks for grouping related tests
+- Use `it` for individual test cases
+
+```typescript
+import { describe, it, expect } from "bun:test";
+
+describe("Collections API", () => {
+  it("should create a collection with valid schema", async () => {
+    const res = await fetchSingleNode("/collections", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "companies",
+        fields: [
+          { name: "company_name", type: "string" },
+          { name: "num_employees", type: "int32" }
+        ]
+      })
+    });
+
+    expect(res.ok).toBe(true);
+  });
+});
+```
+
+### Vitest (tests, benchmark)
+
+- Use Vitest for unit and integration tests
+- Import test functions: `import { test, expect, beforeAll, afterAll } from "vitest"`
+- Use `beforeAll`/`afterAll` for setup and teardown
+- Use `test` for individual test cases
+
+```typescript
+import { test, expect, beforeAll, afterAll } from "vitest";
+
+beforeAll(async () => {
+  // Setup resources
+  const res = await startTypesenseServer();
+  if (res.isErr()) {
+    throw new Error(res.error.message);
+  }
+});
+
+afterAll(async () => {
+  // Cleanup resources
+  await closeDownTypesenseServer();
+});
+
+test("should handle conversation rotation", async () => {
+  // Test implementation
+});
+```
+
+## Assertion Patterns
+
+### Response Validation
+
+- Always verify HTTP response status: `expect(res.ok).toBe(true)`
+- Use Zod schemas for response validation instead of manual object checking
+- Validate both successful and error responses
+
+```typescript
+import { z } from "zod";
+
+const CreateCollectionResponse = z.object({
+  name: z.string(),
+  num_documents: z.number(),
+  fields: z.array(z.object({
+    name: z.string(),
+    type: z.string(),
+    facet: z.boolean(),
+  })),
+});
+
+test("should create collection successfully", async () => {
+  const res = await fetchSingleNode("/collections", { /* ... */ });
+
+  expect(res.ok).toBe(true);
+  const data = CreateCollectionResponse.safeParse(await res.json());
+
+  expect(data.success).toBe(true);
+  expect(data.data?.name).toBe("companies");
+  expect(data.data?.num_documents).toBe(0);
+});
+```
+
+### Error Response Testing
+
+- Test error scenarios with specific status codes and messages
+- Validate error response structure using Zod schemas
+
+```typescript
+const ErrorResponse = z.object({
+  message: z.string(),
+  code: z.number().optional(),
+});
+
+test("should return validation error for invalid schema", async () => {
+  const res = await fetchSingleNode("/collections", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "", // Invalid: empty name
+      fields: []
+    })
+  });
+
+  expect(res.ok).toBe(false);
+  expect(res.status).toBe(400);
+
+  const errorData = ErrorResponse.safeParse(await res.json());
+  expect(errorData.success).toBe(true);
+  expect(errorData.data?.message).toContain("Collection name");
+});
+```
+
+## Async Testing Patterns
+
+### Promise-Based Testing
+
+- Always use `async/await` for asynchronous operations
+- Handle Promise rejections appropriately
+- Use `expect.rejects` for testing Promise rejections
+
+```typescript
+test("should handle async operations", async () => {
+  const result = await processAsyncOperation();
+  expect(result).toBeDefined();
+});
+
+test("should reject invalid input", async () => {
+  await expect(processAsyncOperation(invalidInput))
+    .rejects
+    .toThrow("Invalid input provided");
+});
+```
+
+### Result Pattern Testing
+
+- Use `neverthrow` Result types for error handling
+- Test both `Ok` and `Err` cases separately
+- Verify error messages and success values
+
+```typescript
+import { okAsync, errAsync, ResultAsync } from "neverthrow";
+
+test("should return success result", async () => {
+  const result = await operationThatReturnsResult();
+
+  expect(result.isOk()).toBe(true);
+  if (result.isOk()) {
+    expect(result.value).toEqual(expectedValue);
+  }
+});
+
+test("should return error result for invalid input", async () => {
+  const result = await operationThatReturnsResult(invalidInput);
+
+  expect(result.isErr()).toBe(true);
+  if (result.isErr()) {
+    expect(result.error.message).toContain("Invalid input");
+  }
+});
+```
+
+## Test Data Management
+
+### Environment Configuration
+
+- Use environment variables for test configuration
+- Validate environment setup with Zod schemas
+- Provide sensible defaults for test environments
+
+```typescript
+import { createEnv } from "@t3-oss/env-core";
+import { z } from "zod";
+
+const testEnv = createEnv({
+  client: {
+    TYPESENSE_BINARY: z.string(),
+    TYPESENSE_WORKING_DIRECTORY: z.string(),
+    TYPESENSE_NUM_DIM: z.number().default(256),
+  },
+  runtimeEnv: process.env,
+  skipValidation: process.env.NODE_ENV === "test",
+});
+```
+
+### Test Fixtures and Data
+
+- Store test data in appropriate directories (`artifacts/`, `resources/`)
+- Use JSON/JSONL files for structured test data
+- Clean up temporary files and directories after tests
+
+### Process and Resource Management
+
+- Properly start and stop external processes (Typesense server, OpenAI proxy)
+- Use proper lifecycle hooks (`beforeAll`, `afterAll`)
+- Handle process cleanup gracefully, even on test failures
+
+```typescript
+let serverProcess: ServerProcess | null = null;
+
+beforeAll(async () => {
+  serverProcess = await startTypesenseServer();
+});
+
+afterAll(async () => {
+  if (serverProcess) {
+    await serverProcess.cleanup();
+  }
+});
+```
+
+## TypeScript-Specific Testing
+
+### Type Safety in Tests
+
+- Use proper TypeScript types for test data and responses
+- Leverage type inference where possible
+- Use `satisfies` operator for type-safe object literals
+
+```typescript
+const testData = {
+  name: "test_collection",
+  fields: [
+    { name: "id", type: "string" },
+    { name: "title", type: "string" }
+  ]
+} satisfies CollectionSchema;
+```
+
+### Generic Testing Utilities
+
+- Create reusable test utilities with proper generic types
+- Use function overloads for different test scenarios
+- Maintain type safety in helper functions
+
+```typescript
+async function testEndpoint<T>(
+  endpoint: string,
+  options: RequestInit,
+  schema: z.ZodSchema<T>
+): Promise<T> {
+  const res = await fetch(endpoint, options);
+  expect(res.ok).toBe(true);
+
+  const data = schema.safeParse(await res.json());
+  expect(data.success).toBe(true);
+
+  return data.data!;
+}
+```
+
+## Error Handling and Testing
+
+### Error Boundary Testing
+
+- Test error handling at component and service levels
+- Verify proper error propagation and logging
+- Test error recovery mechanisms
+
+### Network and External Dependencies
+
+- Mock external API calls appropriately
+- Test network failure scenarios
+- Verify proper timeout and retry behavior
+
+```typescript
+test("should handle network timeout", async () => {
+  // Mock network delay
+  const timeoutPromise = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error("Network timeout")), 100)
+  );
+
+  await expect(timeoutPromise).rejects.toThrow("Network timeout");
+});
+```
+
+## Integration Testing
+
+### Multi-Node Testing
+
+- Test distributed Typesense cluster scenarios
+- Verify data consistency across nodes
+- Test node failure and recovery
+
+### End-to-End Workflows
+
+- Test complete user workflows from start to finish
+- Verify data persistence and state management
+- Test real-world usage patterns
+
+### Performance Testing
+
+- Include timing assertions for critical operations
+- Test with realistic data volumes
+- Monitor resource usage during tests

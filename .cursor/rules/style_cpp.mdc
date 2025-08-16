@@ -1,8 +1,11 @@
 ---
-description: Coding style and conventions used in the Typesense C++ codebase
+description: C++ coding style and conventions
 globs:
-  - "include/**"
-  - "src/**"
+  - "**/*.cpp"
+  - "**/*.h"
+  - "**/*.hpp"
+  - "**/*.c"
+  - "**/*.cc"
 ---
 
 # C++ Style Guide for Typesense

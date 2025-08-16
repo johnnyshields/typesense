@@ -1,0 +1,168 @@
+---
+description: C++ testing standards
+globs:
+  - "test/**"
+---
+
+# C++ Testing Standards
+
+## Testing Framework and Structure
+
+### Google Test Framework
+
+- Use **Google Test** (`gtest`) framework for all C++ unit tests
+- Create test fixture classes inheriting from `::testing::Test` for related tests
+- Use `TEST_F` for fixture-based tests and `TEST` for standalone tests
+- Implement proper `SetUp()` and `TearDown()` methods for resource management
+
+```cpp
+class AuthManagerTest : public ::testing::Test {
+protected:
+    Store* store;
+    AuthManager auth_manager;
+
+    void SetUp() override {
+        std::string state_dir_path = "/tmp/typesense_test/auth_manager_test_db";
+        system(("rm -rf " + state_dir_path + " && mkdir -p " + state_dir_path).c_str());
+
+        store = new Store(state_dir_path);
+        auth_manager.init(store, "bootstrap-key");
+    }
+
+    void TearDown() override {
+        delete store;
+    }
+};
+```
+
+### Test Naming Conventions
+
+- Test class names: `ClassNameTest`
+- Test method names: `MethodName_Scenario_ExpectedBehavior`
+- Use descriptive names that clearly indicate what is being tested
+
+```cpp
+TEST_F(AuthManagerTest, CreateAPIKey_ValidInput_ReturnsSuccess) { ... }
+TEST_F(AuthManagerTest, CreateAPIKey_DuplicateKey_ReturnsConflictError) { ... }
+TEST_F(CollectionTest, AddDocument_EmptyPayload_ReturnsValidationError) { ... }
+```
+
+## Assertion Patterns
+
+### Result Validation with Option<T>
+
+- Use `ASSERT_TRUE(result.ok())` for success cases
+- Use `ASSERT_FALSE(result.ok())` for failure cases
+- Always verify specific error codes: `ASSERT_EQ(expected_code, result.code())`
+- Validate error messages: `ASSERT_EQ("Expected message", result.error())`
+
+```cpp
+TEST_F(AuthManagerTest, CreateAPIKey_ValidInput_ReturnsSuccess) {
+    api_key_t api_key("valid_key", "description", {"read"}, {"collection1"}, FUTURE_TS);
+    auto result = auth_manager.create_key(api_key);
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ("valid_key", result.get().value);
+}
+
+TEST_F(AuthManagerTest, CreateAPIKey_DuplicateKey_ReturnsConflictError) {
+    api_key_t api_key("duplicate_key", "desc", {"read"}, {"coll"}, FUTURE_TS);
+    auth_manager.create_key(api_key);  // First insertion
+
+    auto conflict_result = auth_manager.create_key(api_key);  // Duplicate
+    ASSERT_FALSE(conflict_result.ok());
+    ASSERT_EQ(409, conflict_result.code());
+    ASSERT_EQ("API key generation conflict.", conflict_result.error());
+}
+```
+
+### Value Assertions
+
+- Use `ASSERT_EQ` for exact equality comparisons
+- Use `ASSERT_STREQ` for C-style string comparisons
+- Use `EXPECT_*` variants when test should continue after assertion failure
+- Use `ASSERT_*` variants when test should stop after assertion failure
+
+## Test Data Management
+
+### Fixture Files
+
+- Store test data in `test/resources/` directory
+- Use descriptive filenames: `documents.jsonl`, `invalid_config.ini`
+- Clean up generated files in `TearDown()` methods
+
+### Temporary Directories
+
+- Use `/tmp/typesense_test/` prefix for temporary test directories
+- Clean up using `system()` calls or proper RAII cleanup
+- Create unique directory names per test to avoid conflicts
+
+```cpp
+void SetUp() override {
+    std::string state_dir_path = "/tmp/typesense_test/collection_test_db";
+    system(("rm -rf " + state_dir_path + " && mkdir -p " + state_dir_path).c_str());
+
+    store = new Store(state_dir_path);
+}
+```
+
+## Error Testing Patterns
+
+### Input Validation Testing
+
+- Test all parameter combinations (missing, null, wrong type, empty)
+- Verify boundary conditions and limits
+- Test malformed JSON and invalid data formats
+
+```cpp
+TEST_F(ConversationTest, ValidateModel_MissingModelName_ReturnsValidationError) {
+    nlohmann::json config_missing_name = R"({"history_collection": "store"})"_json;
+    auto result = validator.validate_model(config_missing_name);
+
+    ASSERT_FALSE(result.ok());
+    ASSERT_EQ(400, result.code());
+    ASSERT_EQ("Property `model_name` is not provided or not a string.", result.error());
+}
+
+TEST_F(ConversationTest, ValidateModel_WrongDataType_ReturnsValidationError) {
+    nlohmann::json config_wrong_type = R"({"model_name": 123, "history_collection": "store"})"_json;
+    auto result = validator.validate_model(config_wrong_type);
+
+    ASSERT_FALSE(result.ok());
+    ASSERT_EQ(400, result.code());
+}
+```
+
+### Resource Management Testing
+
+- Test proper cleanup of resources (memory, file handles, network connections)
+- Verify behavior under resource exhaustion
+- Test concurrent access and thread safety where applicable
+
+## Integration Testing
+
+### Collection Manager Testing
+
+- Test full lifecycle: create collection → add documents → search → delete
+- Verify persistence across restarts
+- Test multi-collection operations
+
+### HTTP API Testing
+
+- Test complete request/response cycles
+- Verify proper error handling and status codes
+- Test authentication and authorization flows
+
+## Performance Testing
+
+### Benchmarking
+
+- Include performance tests for critical operations
+- Use consistent test data sizes for reproducible results
+- Set reasonable performance thresholds and verify them
+
+### Memory Testing
+
+- Monitor memory usage during bulk operations
+- Test for memory leaks in long-running operations
+- Verify proper cleanup of large data structures
