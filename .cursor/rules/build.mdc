@@ -8,9 +8,9 @@ alwaysApply: true
 
 This project has 3 test sets:
 
-1. Unit tests located in <project_root>/test
-2. API tests located in <project_root>/api_tests
-3. Benchmarks located in <project_root>/benchmark
+1. C++ Unit tests located in ./test
+2. Typescript API tests located in ./api_tests
+3. Typescript Benchmarks located in ./benchmark
 
 If a user asks to test the project without more specific instructions, this typically means "run the unit tests, then the API tests." The benchmarks are optional; include them only if being thorough.
 
@@ -36,6 +36,12 @@ fi
 bazel build //:typesense-server
 ```
 
+also refer to:
+
+```sh
+./ci_build_v2.sh
+```
+
 ### Build/run tests
 
 All unit tests:
@@ -54,17 +60,17 @@ bazel test //:typesense-test --cache_test_results=no --test_output=all --test_ti
 
 ### Install API test dependencies
 
-Refer to `<project_root>/.github/workflows/tests.yml` for dependencies. Look for `api-tests:`
+Refer to `.github/workflows/tests.yml` for dependencies. Look for `api-tests:`
 
 Install bun outside of snap confinement.
 https://bun.com/docs/installation
 
 ### Download API test artifacts
 
-Refer to `<project_root>/.github/workflows/tests.yml` API artifacts version and replace `XX` (or cmd) below.
+Refer to `.github/workflows/tests.yml` API artifacts version and replace `XX` (or cmd) below.
 
 ```sh
-cd <project_root>/api-tests
+cd ./api-tests
 mkdir -p ./artifacts
 curl https://dl.typesense.org/ci/typesense/vXX-snapshot-1.tar.gz > ./artifacts/vXX-snapshot.tar.gz
 tar -xzf ./artifacts/vXX-snapshot.tar.gz -C ./artifacts/
@@ -96,3 +102,11 @@ cd api_tests && TYPESENSE_BINARY_PATH="<bazel cquery path above>" TYPESENSE_DATA
 - Do not attempt to run Node.js as an alternative for bun.
 
 ## Benchmarks
+
+
+
+## Releasing a Dist
+
+```sh
+./ci_build_v2.sh
+```

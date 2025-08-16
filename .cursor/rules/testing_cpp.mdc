@@ -6,7 +6,34 @@ globs:
 
 # C++ Testing Standards
 
-## Testing Framework and Structure
+## Environment
+
+### Directory Structure
+
+- `/test/` - All C++ tests are here.
+
+### Fixture Files
+
+- Store test data in `test/resources/` directory
+- Use descriptive filenames: `documents.jsonl`, `invalid_config.ini`
+- Clean up generated files in `TearDown()` methods
+
+### Temporary Directories
+
+- Use `/tmp/typesense_test/` prefix for temporary test directories
+- Clean up using `system()` calls or proper RAII cleanup
+- Create unique directory names per test to avoid conflicts
+
+```cpp
+void SetUp() override {
+    std::string state_dir_path = "/tmp/typesense_test/collection_test_db";
+    system(("rm -rf " + state_dir_path + " && mkdir -p " + state_dir_path).c_str());
+
+    store = new Store(state_dir_path);
+}
+```
+
+## Testing Frameworks
 
 ### Google Test Framework
 
@@ -35,7 +62,7 @@ protected:
 };
 ```
 
-### Test Naming Conventions
+## Test Naming Conventions
 
 - Test class names: `ClassNameTest`
 - Test method names: `MethodName_Scenario_ExpectedBehavior`
@@ -82,29 +109,6 @@ TEST_F(AuthManagerTest, CreateAPIKey_DuplicateKey_ReturnsConflictError) {
 - Use `ASSERT_STREQ` for C-style string comparisons
 - Use `EXPECT_*` variants when test should continue after assertion failure
 - Use `ASSERT_*` variants when test should stop after assertion failure
-
-## Test Data Management
-
-### Fixture Files
-
-- Store test data in `test/resources/` directory
-- Use descriptive filenames: `documents.jsonl`, `invalid_config.ini`
-- Clean up generated files in `TearDown()` methods
-
-### Temporary Directories
-
-- Use `/tmp/typesense_test/` prefix for temporary test directories
-- Clean up using `system()` calls or proper RAII cleanup
-- Create unique directory names per test to avoid conflicts
-
-```cpp
-void SetUp() override {
-    std::string state_dir_path = "/tmp/typesense_test/collection_test_db";
-    system(("rm -rf " + state_dir_path + " && mkdir -p " + state_dir_path).c_str());
-
-    store = new Store(state_dir_path);
-}
-```
 
 ## Error Testing Patterns
 

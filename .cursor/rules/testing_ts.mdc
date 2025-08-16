@@ -8,6 +8,61 @@ globs:
 
 # TypeScript Testing Standards
 
+## Environment
+
+### Directory Structure
+
+- `/tests/` - Shared testing infrastructure package that provides utilities, server management, and mocks
+- `/api_tests/` - API integration tests using Bun Test that import from `/tests/` for setup
+- `/benchmark/` - Performance tests using Vitest that import from `/tests/` for infrastructure
+
+### Test Fixtures and Data
+
+- Store test data in appropriate directories (`artifacts/`, `resources/`)
+- Use JSON/JSONL files for structured test data
+- Clean up temporary files and directories after tests
+
+### Environment Configuration
+
+- Use environment variables for test configuration
+- Validate environment setup with Zod schemas
+- Provide sensible defaults for test environments
+
+```typescript
+import { createEnv } from "@t3-oss/env-core";
+import { z } from "zod";
+
+const testEnv = createEnv({
+  client: {
+    TYPESENSE_BINARY: z.string(),
+    TYPESENSE_WORKING_DIRECTORY: z.string(),
+    TYPESENSE_NUM_DIM: z.number().default(256),
+  },
+  runtimeEnv: process.env,
+  skipValidation: process.env.NODE_ENV === "test",
+});
+```
+
+### Process and Resource Management
+
+- Properly start and stop external processes (Typesense server, OpenAI proxy)
+- Use proper lifecycle hooks (`beforeAll`, `afterAll`)
+- Handle process cleanup gracefully, even on test failures
+
+```typescript
+let serverProcess: ServerProcess | null = null;
+
+beforeAll(async () => {
+  serverProcess = await startTypesenseServer();
+});
+
+afterAll(async () => {
+  if (serverProcess) {
+    await serverProcess.cleanup();
+  }
+});
+```
+
 ## Testing Frameworks
 
 ### Bun Test (api_tests)
@@ -173,55 +228,6 @@ test("should return error result for invalid input", async () => {
   expect(result.isErr()).toBe(true);
   if (result.isErr()) {
     expect(result.error.message).toContain("Invalid input");
-  }
-});
-```
-
-## Test Data Management
-
-### Environment Configuration
-
-- Use environment variables for test configuration
-- Validate environment setup with Zod schemas
-- Provide sensible defaults for test environments
-
-```typescript
-import { createEnv } from "@t3-oss/env-core";
-import { z } from "zod";
-
-const testEnv = createEnv({
-  client: {
-    TYPESENSE_BINARY: z.string(),
-    TYPESENSE_WORKING_DIRECTORY: z.string(),
-    TYPESENSE_NUM_DIM: z.number().default(256),
-  },
-  runtimeEnv: process.env,
-  skipValidation: process.env.NODE_ENV === "test",
-});
-```
-
-### Test Fixtures and Data
-
-- Store test data in appropriate directories (`artifacts/`, `resources/`)
-- Use JSON/JSONL files for structured test data
-- Clean up temporary files and directories after tests
-
-### Process and Resource Management
-
-- Properly start and stop external processes (Typesense server, OpenAI proxy)
-- Use proper lifecycle hooks (`beforeAll`, `afterAll`)
-- Handle process cleanup gracefully, even on test failures
-
-```typescript
-let serverProcess: ServerProcess | null = null;
-
-beforeAll(async () => {
-  serverProcess = await startTypesenseServer();
-});
-
-afterAll(async () => {
-  if (serverProcess) {
-    await serverProcess.cleanup();
   }
 });
 ```
