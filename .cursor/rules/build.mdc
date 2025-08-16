@@ -8,9 +8,9 @@ alwaysApply: true
 
 This project has 3 test sets:
 
-1. C++ Unit tests located in ./test
-2. Typescript API tests located in ./api_tests
-3. Typescript Benchmarks located in ./benchmark
+1. C++ Unit tests located in /test
+2. Typescript API tests located in /api_tests
+3. Typescript Benchmarks located in /benchmark
 
 If a user asks to test the project without more specific instructions, this typically means "run the unit tests, then the API tests." The benchmarks are optional; include them only if being thorough.
 
@@ -18,7 +18,7 @@ If a user asks to test the project without more specific instructions, this typi
 
 ### Install unit test dependencies
 
-See `<project_root>/.github/workflows/tests.yml` for dependencies. Look for `- name: Install dependencies`
+See `.github/workflows/tests.yml` for dependencies. Look for `- name: Install dependencies`
 
 ### Setup artifacts for unit tests
 
@@ -103,7 +103,7 @@ cd api_tests && TYPESENSE_BINARY_PATH="<bazel cquery path above>" TYPESENSE_DATA
 
 ## Benchmarks
 
-
+TODO - Complete this!!
 
 ## Releasing a Dist
 
