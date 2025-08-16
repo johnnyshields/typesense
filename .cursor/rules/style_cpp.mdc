@@ -147,11 +147,11 @@ HttpServer::HttpServer(const std::string& version,
 class alter_guard_t {
     std::string collection_name;
 public:
-    alter_guard_t(const std::string& collection) : 
+    alter_guard_t(const std::string& collection) :
         collection_name(collection) {
         // Acquire resource/lock
     }
-    
+
     ~alter_guard_t() {
         // Automatic cleanup even on exception
     }
@@ -220,10 +220,10 @@ class Collection {
 private:  // Private first
     mutable std::shared_mutex mutex;
     const std::string name;
-    
+
 protected:  // Then protected
     virtual void internal_method();
-    
+
 public:  // Public last
     explicit Collection(const std::string& name);  // explicit for single-param
     void public_method();

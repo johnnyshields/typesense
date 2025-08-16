@@ -62,12 +62,12 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 
 describe("Collections API", () => {
   let serverPort: number;
-  
+
   beforeAll(async () => {
     const server = await startTypesenseServer();
     serverPort = server.port;
   });
-  
+
   it("should create collection with valid schema", async () => {
     const res = await fetchSingleNode("/collections", {
       method: "POST",
@@ -79,11 +79,11 @@ describe("Collections API", () => {
         ]
       })
     });
-    
+
     expect(res.ok).toBe(true);
     expect(res.status).toBe(201);
   });
-  
+
   // Nested describes for organization
   describe("error handling", () => {
     it("should reject empty collection name", async () => {
@@ -114,7 +114,7 @@ describe("Conversation Management", () => {
   test("should handle conversation rotation", async () => {
     // Test implementation
   });
-  
+
   test.concurrent("can run in parallel", async () => {
     // Parallel test execution
   });
@@ -148,12 +148,12 @@ test("should create collection successfully", async () => {
     method: "POST",
     body: JSON.stringify(collectionSchema)
   });
-  
+
   expect(res.ok).toBe(true);
-  
+
   // Parse and validate response
   const data = CreateCollectionResponse.safeParse(await res.json());
-  
+
   expect(data.success).toBe(true);
   if (data.success) {  // Type guard for TypeScript
     expect(data.data.name).toBe("companies");
@@ -179,13 +179,13 @@ test("should return validation error for invalid schema", async () => {
       fields: []
     })
   });
-  
+
   expect(res.ok).toBe(false);
   expect(res.status).toBe(400);
-  
+
   const errorData = ErrorResponse.safeParse(await res.json());
   expect(errorData.success).toBe(true);
-  
+
   if (errorData.success) {
     expect(errorData.data.message).toContain("Collection name cannot be empty");
     expect(errorData.data.field).toBe("name");
@@ -199,7 +199,7 @@ import { okAsync, errAsync, ResultAsync } from "neverthrow";
 
 test("should return success result", async () => {
   const result = await operationThatReturnsResult();
-  
+
   expect(result.isOk()).toBe(true);
   if (result.isOk()) {
     expect(result.value.id).toBeDefined();
@@ -209,7 +209,7 @@ test("should return success result", async () => {
 
 test("should return error result for invalid input", async () => {
   const result = await operationThatReturnsResult(invalidInput);
-  
+
   expect(result.isErr()).toBe(true);
   if (result.isErr()) {
     expect(result.error.message).toContain("Invalid input");
@@ -223,7 +223,7 @@ test("should handle result chain", async () => {
     .andThen(data => processData(data))
     .map(processed => transformed(processed))
     .mapErr(error => new CustomError(error));
-    
+
   expect(result.isOk()).toBe(true);
 });
 ```
@@ -257,12 +257,12 @@ test("should throw ValidationError", async () => {
 ### Concurrent Operations
 ```typescript
 test("should handle parallel requests", async () => {
-  const operations = Array.from({ length: 10 }, (_, i) => 
+  const operations = Array.from({ length: 10 }, (_, i) =>
     createDocument({ id: `doc_${i}`, content: `Test ${i}` })
   );
-  
+
   const results = await Promise.all(operations);
-  
+
   expect(results).toHaveLength(10);
   results.forEach(result => {
     expect(result.isOk()).toBe(true);
@@ -276,9 +276,9 @@ test("should handle partial failures", async () => {
     createDocument(invalidDoc),
     createDocument(validDoc2),
   ];
-  
+
   const results = await Promise.allSettled(operations);
-  
+
   expect(results[0].status).toBe("fulfilled");
   expect(results[1].status).toBe("rejected");
   expect(results[2].status).toBe("fulfilled");
@@ -297,15 +297,15 @@ async function testEndpoint<T>(
 ): Promise<T> {
   const res = await fetch(endpoint, options);
   expect(res.ok).toBe(true);
-  
+
   const json = await res.json();
   const parsed = schema.safeParse(json);
-  
+
   expect(parsed.success).toBe(true);
   if (!parsed.success) {
     throw new Error(`Schema validation failed: ${parsed.error.message}`);
   }
-  
+
   return parsed.data;
 }
 
@@ -327,8 +327,8 @@ function mockTypesenseAPI() {
       found: 0,
       search_time_ms: 1
     }),
-    
-    createDocument: vi.fn().mockImplementation((doc) => 
+
+    createDocument: vi.fn().mockImplementation((doc) =>
       Promise.resolve({ id: doc.id, ...doc })
     ),
   };
@@ -338,7 +338,7 @@ function mockTypesenseAPI() {
 test("should handle API error", async () => {
   const mockApi = mockTypesenseAPI();
   mockApi.search.mockRejectedValueOnce(new Error("Network error"));
-  
+
   const result = await searchWithFallback(mockApi, "query");
   expect(result.source).toBe("cache");  // Falls back to cache
 });
@@ -350,7 +350,7 @@ test("should handle API error", async () => {
 ```typescript
 describe("Multi-node cluster", () => {
   let nodes: ServerProcess[] = [];
-  
+
   beforeAll(async () => {
     // Start 3-node cluster
     nodes = await Promise.all([
@@ -359,15 +359,15 @@ describe("Multi-node cluster", () => {
       startTypesenseServer({ port: 8110 }),
     ]);
   });
-  
+
   test("should replicate data across nodes", async () => {
     // Write to node 1
     await createDocument(nodes[0].port, doc);
-    
+
     // Read from node 2 and 3
     const doc2 = await getDocument(nodes[1].port, doc.id);
     const doc3 = await getDocument(nodes[2].port, doc.id);
-    
+
     expect(doc2).toEqual(doc);
     expect(doc3).toEqual(doc);
   });
@@ -379,18 +379,18 @@ describe("Multi-node cluster", () => {
 test("complete user journey", async () => {
   // 1. Create account
   const user = await createUser({ email: "test@example.com" });
-  
+
   // 2. Create collection
   const collection = await createCollection(user.apiKey, schema);
-  
+
   // 3. Import documents
   const importResult = await bulkImport(user.apiKey, documents);
   expect(importResult.success).toBe(documents.length);
-  
+
   // 4. Search documents
   const searchResults = await search(user.apiKey, "query");
   expect(searchResults.hits.length).toBeGreaterThan(0);
-  
+
   // 5. Cleanup
   await deleteCollection(user.apiKey, collection.name);
   await deleteUser(user.id);
@@ -403,11 +403,11 @@ test("complete user journey", async () => {
 ```typescript
 test("should meet latency requirements", async () => {
   const start = performance.now();
-  
+
   const result = await searchDocuments("test query");
-  
+
   const duration = performance.now() - start;
-  
+
   expect(result.hits).toBeDefined();
   expect(duration).toBeLessThan(100);  // Must complete within 100ms
 });
@@ -420,16 +420,16 @@ test("should handle concurrent load", async () => {
   const requests = Array.from({ length: concurrentRequests }, () =>
     searchDocuments("test")
   );
-  
+
   const start = performance.now();
   const results = await Promise.all(requests);
   const duration = performance.now() - start;
-  
+
   // All requests should succeed
   results.forEach(result => {
     expect(result.isOk()).toBe(true);
   });
-  
+
   // Should complete within reasonable time
   const avgLatency = duration / concurrentRequests;
   expect(avgLatency).toBeLessThan(50);  // 50ms average
@@ -456,9 +456,9 @@ describe("Network error handling", () => {
       }
       return Promise.resolve({ ok: true });
     });
-    
+
     const result = await fetchWithRetry(mockFetch, "/endpoint");
-    
+
     expect(attempts).toBe(3);
     expect(result.ok).toBe(true);
   });

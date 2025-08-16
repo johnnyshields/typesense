@@ -9,7 +9,7 @@ alwaysApply: true
 ## Overview
 This project has 3 test sets:
 1. C++ Unit tests in `/test`
-2. TypeScript API tests in `/api_tests`  
+2. TypeScript API tests in `/api_tests`
 3. TypeScript Benchmarks in `/benchmark`
 
 **Default test command**: Run unit tests, then API tests. Benchmarks are optional unless being thorough.
@@ -19,7 +19,8 @@ This project has 3 test sets:
 ### Setup
 ```bash
 # Install dependencies - ALWAYS check .github/workflows/tests.yml
-# Look specifically for "- name: Install dependencies" section
+# Look for "- name: Install dependencies" section
+# also do "sudo update-alternatives" as per tests.yml
 
 # Get test artifacts (skip mtime check if user asks to refresh)
 if [ ! -f ./test/resources/models.tar.gz ] || [ $(find ./test/resources/models.tar.gz -mtime +30 2>/dev/null | wc -l) -gt 0 ]; then
@@ -41,6 +42,16 @@ bazel test //:typesense-test --cache_test_results=no --test_output=all --test_ti
 # Specific test filter
 bazel test //:typesense-test --cache_test_results=no --test_output=all --test_timeout=30 --test_filter="*RaftServer*"
 ```
+
+### Troubleshooting
+- Ensure you ran "sudo update alternatives" as per .github/workflows/tests.yml
+- Try `bazel build //:typesense-server --spawn_strategy=standalone` if dir issues
+- Try explictly setting ccache tmp and/or cache dirs
+    ```sh
+    mkdir -p /tmp/ccache-tmp && chmod 777 /tmp/ccache-tmp && ccache --set-config=temporary_dir=/tmp/ccache-tmp
+    mkdir -p /tmp/ccache-cache && chmod 777 /tmp/ccache-cache && ccache --set-config=cache_dir=/tmp/ccache-cache
+    ```
+- If rocksdb gives compiler ":" errors, add to `bazel/rocksdb.BUILD` → `"CMAKE_RANLIB": "/usr/bin/ranlib"` and `"-DCMAKE_RANLIB=/usr/bin/ranlib"`
 
 ## API Tests
 
@@ -75,7 +86,7 @@ cd api_tests && TYPESENSE_BINARY_PATH="<bazel cquery path above>" TYPESENSE_DATA
 ```
 
 ### Troubleshooting
-- **GLIBC errors** = bun installed in snap confinement (reinstall properly)
+- API tests **GLIBC errors** → bun installed in snap confinement (reinstall outside snap)
 - **Do not attempt Node.js** as alternative for bun - it won't work
 
 ## Benchmarks

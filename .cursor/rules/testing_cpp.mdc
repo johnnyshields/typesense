@@ -23,10 +23,10 @@ protected:
     void SetUp() override {
         // Always use unique paths to prevent interference
         std::string state_dir_path = "/tmp/typesense_test/auth_manager_test_db";
-        
+
         // Clean slate - rm -rf then mkdir
         system(("rm -rf " + state_dir_path + " && mkdir -p " + state_dir_path).c_str());
-        
+
         store = new Store(state_dir_path);
         auth_manager.init(store, "bootstrap-key");
     }
@@ -70,7 +70,7 @@ TEST_F(CollectionTest, Search_WithTypo_ReturnsCorrection) { }
 TEST_F(AuthManagerTest, CreateAPIKey_ValidInput_ReturnsSuccess) {
     api_key_t api_key("valid_key", "description", {"read"}, {"collection1"}, FUTURE_TS);
     auto result = auth_manager.create_key(api_key);
-    
+
     ASSERT_TRUE(result.ok());
     ASSERT_EQ("valid_key", result.get().value);
     ASSERT_EQ("description", result.get().description);
@@ -80,7 +80,7 @@ TEST_F(AuthManagerTest, CreateAPIKey_ValidInput_ReturnsSuccess) {
 TEST_F(AuthManagerTest, CreateAPIKey_DuplicateKey_ReturnsConflictError) {
     api_key_t api_key("duplicate_key", "desc", {"read"}, {"coll"}, FUTURE_TS);
     auth_manager.create_key(api_key);  // First insertion
-    
+
     auto conflict_result = auth_manager.create_key(api_key);  // Duplicate
     ASSERT_FALSE(conflict_result.ok());
     ASSERT_EQ(409, conflict_result.code());  // Always verify specific code
@@ -113,7 +113,7 @@ EXPECT_EQ(expected, actual);
 TEST_F(ConversationTest, ValidateModel_MissingModelName_ReturnsError) {
     nlohmann::json config = R"({"history_collection": "store"})"_json;
     auto result = validator.validate_model(config);
-    
+
     ASSERT_FALSE(result.ok());
     ASSERT_EQ(400, result.code());
     ASSERT_EQ("Property `model_name` is not provided or not a string.", result.error());
@@ -122,7 +122,7 @@ TEST_F(ConversationTest, ValidateModel_MissingModelName_ReturnsError) {
 TEST_F(ConversationTest, ValidateModel_WrongDataType_ReturnsError) {
     nlohmann::json config = R"({"model_name": 123, "history_collection": "store"})"_json;
     auto result = validator.validate_model(config);
-    
+
     ASSERT_FALSE(result.ok());
     ASSERT_EQ(400, result.code());
     // Different error for wrong type
@@ -131,7 +131,7 @@ TEST_F(ConversationTest, ValidateModel_WrongDataType_ReturnsError) {
 TEST_F(ConversationTest, ValidateModel_EmptyModelName_ReturnsError) {
     nlohmann::json config = R"({"model_name": "", "history_collection": "store"})"_json;
     auto result = validator.validate_model(config);
-    
+
     ASSERT_FALSE(result.ok());
     ASSERT_EQ(400, result.code());
     // Different error for empty string
@@ -163,7 +163,7 @@ TEST_F(StoreTest, ConcurrentWrites_NoDataCorruption) {
         });
     }
     for(auto& t : threads) t.join();
-    
+
     // Verify all writes succeeded and data intact
 }
 ```
@@ -174,11 +174,11 @@ TEST_F(CollectionTest, Delete_AfterCreate_Success) {
     // Create collection
     auto create_result = manager.create_collection(schema);
     ASSERT_TRUE(create_result.ok());
-    
+
     // Delete collection
     auto delete_result = manager.delete_collection("test");
     ASSERT_TRUE(delete_result.ok());
-    
+
     // Verify collection no longer exists
     auto get_result = manager.get_collection("test");
     ASSERT_FALSE(get_result.ok());
@@ -194,18 +194,18 @@ TEST_F(CollectionManagerTest, FullLifecycle_CreateIndexSearchDelete) {
     // 1. Create collection
     auto create_op = manager.create_collection(schema);
     ASSERT_TRUE(create_op.ok());
-    
+
     // 2. Add documents
     for(const auto& doc : test_documents) {
         auto add_op = collection->add(doc);
         ASSERT_TRUE(add_op.ok());
     }
-    
+
     // 3. Search documents
     auto search_op = collection->search("query", {"field"}, "", {});
     ASSERT_TRUE(search_op.ok());
     ASSERT_GT(search_op.get()["hits"].size(), 0);
-    
+
     // 4. Delete collection
     auto delete_op = manager.delete_collection("test");
     ASSERT_TRUE(delete_op.ok());
@@ -221,7 +221,7 @@ TEST_F(CollectionManagerTest, DataPersistence_AcrossRestarts) {
         manager1.create_collection(schema);
         manager1.get_collection("test")->add(document);
     }  // Destructor called
-    
+
     // Reload and verify
     {
         CollectionManager manager2(store);
@@ -239,13 +239,13 @@ TEST_F(CollectionManagerTest, DataPersistence_AcrossRestarts) {
 TEST_F(CollectionPerfTest, Search_LargeDataset_MeetsLatencyTarget) {
     // Setup: Load 100k documents
     load_test_dataset(100000);
-    
+
     auto start = std::chrono::high_resolution_clock::now();
     auto result = collection->search("test query", {"text"}, "", {});
     auto end = std::chrono::high_resolution_clock::now();
-    
+
     auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    
+
     ASSERT_TRUE(result.ok());
     ASSERT_LT(duration_ms, 100);  // Must complete within 100ms
 }
