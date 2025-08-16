@@ -56,7 +56,8 @@ bazel test //:typesense-test --cache_test_results=no --test_output=all --test_ti
 
 Refer to `<project_root>/.github/workflows/tests.yml` for dependencies. Look for `api-tests:`
 
-Install bun (https://bun.com/docs/installation)
+Install bun outside of snap confinement.
+https://bun.com/docs/installation
 
 ### Download API test artifacts
 
@@ -95,5 +96,10 @@ then run:
 ```sh
 ./api_tests/typesense-api-tests --no-secrets
 ```
+
+### Troubleshooting
+
+- If you see GLBIC errors, they are probably due to bun being installed inside snap confinement.
+- Do not attempt to run Node.js as an alternative for bun.
 
 ## Benchmarks
