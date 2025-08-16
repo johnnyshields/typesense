@@ -84,17 +84,10 @@ Build core server binary as per Unit Tests section above, then find it with:
 bazel cquery --output=files //:typesense-server
 ```
 
-and set env vars:
-
-```pseudocode
-TYPESENSE_BINARY_PATH: <according to bazel cquery>
-TYPESENSE_DATA_DIR: <project_root>/tmp/test
-```
-
 then run:
 
 ```sh
-./api_tests/typesense-api-tests --no-secrets
+cd api_tests && TYPESENSE_BINARY_PATH="<bazel cquery path above>" TYPESENSE_DATA_DIR="./test-data" bun run src/cli.ts
 ```
 
 ### Troubleshooting

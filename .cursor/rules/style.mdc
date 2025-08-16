@@ -1,0 +1,387 @@
+
+# C++ Style Guide for Typesense
+
+This document outlines the coding style and conventions used in the Typesense C++ codebase.
+
+## File Organization
+
+### Header Files
+
+- Use `#pragma once` for header guards
+- Header files should have `.h` extension
+- Implementation files should have `.cpp` extension
+
+### Include Order
+
+```cpp
+// 1. System/standard library headers (with <>)
+#include <string>
+#include <vector>
+#include <chrono>
+
+// 2. Third-party library headers (with <>)
+#include <brpc/controller.h>
+#include <nlohmann/json.hpp>
+
+// 3. Local project headers (with "")
+#include "collection.h"
+#include "string_utils.h"
+```
+
+## Naming Conventions
+
+### Classes and Structs
+
+- **PascalCase** for class/struct names
+- Use descriptive names that clearly indicate purpose
+
+```cpp
+class HttpServer {
+class CollectionManager {
+struct api_key_t {
+struct highlight_field_t {
+```
+
+### Functions and Methods
+
+- **snake_case** for function and method names
+- Use descriptive verbs that indicate the action
+
+```cpp
+Option<bool> add_conversation(const nlohmann::json& conversation);
+std::string get_name() const;
+static CollectionManager& get_instance();
+void process_search_field_weights();
+```
+
+### Variables
+
+- **snake_case** for all variables (local, member, parameter)
+- Use descriptive names
+
+```cpp
+std::string collection_name;
+std::vector<std::string> api_key_json_strs;
+const std::shared_ptr<http_req> request;
+uint32_t next_seq_id;
+```
+
+### Constants
+
+- **SCREAMING_SNAKE_CASE** for constants and static constexpr
+- Prefix with descriptive context when appropriate
+
+```cpp
+static constexpr const char* COLLECTION_META_PREFIX = "$CM";
+static constexpr const char* API_KEYS_PREFIX = "$AK";
+static constexpr const uint64_t FAR_FUTURE_TIMESTAMP = 64723363199;
+const size_t DELAY_WRITE_RULE_SIZE = 4;
+```
+
+### Namespaces
+
+- Use lowercase with underscores if needed
+- Avoid deeply nested namespaces
+
+```cpp
+using namespace std::chrono_literals;
+```
+
+## Code Formatting
+
+### Indentation
+
+- Use **4 spaces** for indentation (no tabs)
+- Align continuation lines appropriately
+
+### Braces
+
+- Opening brace on the same line for classes, functions, and control structures
+- Closing brace on its own line
+
+```cpp
+class Collection {
+private:
+    std::string name;
+public:
+    Collection(const std::string& name) {
+        this->name = name;
+    }
+
+    bool process_data() {
+        if (condition) {
+            return true;
+        }
+        return false;
+    }
+};
+```
+
+### Line Length
+
+- Aim for 120 characters maximum per line
+- Break long function signatures and parameter lists appropriately
+
+```cpp
+collection_search_args_t(std::string raw_query,
+                        std::vector<std::string> search_fields,
+                        std::string filter_query,
+                        std::vector<std::string> facet_fields) :
+    raw_query(std::move(raw_query)),
+    search_fields(std::move(search_fields)),
+    filter_query(std::move(filter_query)) {}
+```
+
+### Spacing
+
+- Space after control flow keywords: `if (`, `while (`, `for (`
+- Space around operators: `a + b`, `a == b`
+- No space between function name and parentheses: `function()`
+- Space after comma in parameter lists: `func(a, b, c)`
+
+## Type Declarations
+
+### Pointers and References
+
+- Pointer asterisk attached to type: `Type* ptr`
+- Reference ampersand attached to type: `Type& ref`
+
+```cpp
+Store* store;
+const std::shared_ptr<http_req>& request;
+std::vector<field>& fields;
+```
+
+### Auto Usage
+
+- Use `auto` for complex template types and iterators
+- Avoid `auto` when the type provides important context
+
+```cpp
+auto begin = std::chrono::high_resolution_clock::now();
+const auto& it = hobj.find(fragment);
+```
+
+## Class Design
+
+### Constructor Style
+
+- Use member initialization lists
+- Initialize members in declaration order
+
+```cpp
+HttpServer::HttpServer(const std::string& version,
+                      const std::string& listen_address,
+                      uint32_t listen_port) :
+    exit_loop(false),
+    version(version),
+    listen_address(listen_address),
+    listen_port(listen_port) {
+    // Constructor body
+}
+```
+
+### Singleton Pattern
+
+- Use static local variable approach
+- Delete copy constructor and assignment operator
+
+```cpp
+class AnalyticsManager {
+private:
+    AnalyticsManager() {}
+    ~AnalyticsManager();
+
+public:
+    static AnalyticsManager& get_instance() {
+        static AnalyticsManager instance;
+        return instance;
+    }
+
+    AnalyticsManager(AnalyticsManager const&) = delete;
+    void operator=(AnalyticsManager const&) = delete;
+};
+```
+
+### Member Variables
+
+- Private members first, then protected, then public
+- Group related members together
+- Use `mutable` for thread-safety helpers in const methods
+
+```cpp
+class Collection {
+private:
+    mutable std::shared_mutex mutex;
+
+    const std::string name;
+    const std::atomic<uint32_t> collection_id;
+    std::atomic<size_t> num_documents;
+
+public:
+    // Public interface
+};
+```
+
+## Error Handling
+
+### Option Pattern
+
+- Use `Option<T>` wrapper for functions that can fail
+- Return appropriate error codes and messages
+
+```cpp
+Option<bool> validate_model(const nlohmann::json& model_config) {
+    if(model_config.count("model_name") == 0) {
+        return Option<bool>(400, "Property `model_name` is not provided.");
+    }
+    return Option<bool>(true);
+}
+```
+
+## Memory Management
+
+### Smart Pointers
+
+- Prefer `std::shared_ptr` for shared ownership
+- Use `std::unique_ptr` for exclusive ownership
+- Use raw pointers only for non-owning references
+
+```cpp
+const std::shared_ptr<http_req> request;
+std::unique_ptr<search_args> index_args;
+Store* store;  // non-owning
+```
+
+### RAII Pattern
+
+- Use RAII for resource management
+- Create guard classes for automatic cleanup
+
+```cpp
+class alter_guard_t {
+    std::string collection_name;
+public:
+    alter_guard_t(const std::string& collection) {
+        // Acquire resource
+    }
+
+    ~alter_guard_t() {
+        // Release resource
+    }
+};
+```
+
+## Threading and Concurrency
+
+### Mutex Usage
+
+- Use `std::shared_mutex` for reader-writer scenarios
+- Use RAII lock guards
+- Be consistent with lock types
+
+```cpp
+mutable std::shared_mutex mutex;
+
+// For reading
+std::shared_lock lock(mutex);
+
+// For writing
+std::unique_lock lock(mutex);
+```
+
+### Atomic Variables
+
+- Use `std::atomic<T>` for simple thread-safe variables
+
+```cpp
+std::atomic<bool> quit = false;
+std::atomic<size_t> num_documents;
+```
+
+## Comments and Documentation
+
+### Function Comments
+
+- Document complex algorithms and business logic
+- Explain non-obvious parameter meanings
+
+```cpp
+// Implements the callback for the state machine
+class ReplicationClosure : public braft::Closure {
+    // Implementation
+};
+```
+
+### Inline Comments
+
+- Use `//` for single-line comments
+- Place comments above the code they describe
+- Keep comments concise and relevant
+
+### TODO Comments
+
+- Use consistent format for temporary notes
+
+```cpp
+// TODO: implement caching mechanism
+// FIXME: handle edge case for empty collections
+```
+
+## Constants and Enums
+
+### Static Constants
+
+- Use `static constexpr` for compile-time constants
+- Group related constants together
+
+```cpp
+class Collection {
+    static constexpr const char* COLLECTION_META_PREFIX = "$CM";
+    static constexpr const char* COLLECTION_NEXT_SEQ_PREFIX = "$CS";
+    static constexpr const char* SEQ_ID_PREFIX = "$SI";
+};
+```
+
+### Enums
+
+- Prefer enum class over plain enums
+- Use descriptive names for enum values
+
+## Template Usage
+
+### Template Parameters
+
+- Use descriptive template parameter names
+- Follow the same naming conventions as regular types
+
+```cpp
+template<class T>
+bool highlight_nested_field(const nlohmann::json& hdoc,
+                           nlohmann::json& hobj,
+                           T func);
+```
+
+## Best Practices
+
+### General Guidelines
+
+1. **Const Correctness**: Mark methods `const` when they don't modify object state
+2. **Move Semantics**: Use `std::move()` for expensive-to-copy objects in constructors
+3. **RAII**: Always use RAII for resource management
+4. **Explicit Constructors**: Mark single-parameter constructors `explicit` to prevent implicit conversions
+5. **Default Members**: Use `= default` and `= delete` for special member functions
+
+### Performance Considerations
+
+- Reserve vector capacity when size is known: `vector.reserve(size)`
+- Use references to avoid unnecessary copies
+- Consider using `string_view` for read-only string parameters
+- Use move semantics for temporary objects
+
+### Code Organization
+
+- Keep header files minimal - include only what's necessary
+- Use forward declarations when possible
+- Group related functionality in classes/namespaces
+- Separate interface from implementation
