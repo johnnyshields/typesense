@@ -18,4 +18,8 @@ typesense-data
 /onnxruntime-prefix
 .secrets
 /dist
+/tmp
 *.tar.gz
+/old_code/*
+/new_code/*
+/new_classy_code/*
