@@ -44,14 +44,12 @@ bazel test //:typesense-test --cache_test_results=no --test_output=all --test_ti
 ```
 
 ### Troubleshooting
-- Ensure you ran "sudo update alternatives" as per .github/workflows/tests.yml
-- Try `bazel build //:typesense-server --spawn_strategy=standalone` if dir issues
-- Try explictly setting ccache tmp and/or cache dirs
-    ```sh
-    mkdir -p /tmp/ccache-tmp && chmod 777 /tmp/ccache-tmp && ccache --set-config=temporary_dir=/tmp/ccache-tmp
-    mkdir -p /tmp/ccache-cache && chmod 777 /tmp/ccache-cache && ccache --set-config=cache_dir=/tmp/ccache-cache
-    ```
-- If rocksdb gives compiler ":" errors, add to `bazel/rocksdb.BUILD` → `"CMAKE_RANLIB": "/usr/bin/ranlib"` and `"-DCMAKE_RANLIB=/usr/bin/ranlib"`
+```bash
+# Ensure "sudo update alternatives" as per .github/workflows/tests.yml
+
+# Try explictly setting ccache tmp and/or cache dir
+mkdir -p /tmp/ccache-tmp && chmod 777 /tmp/ccache-tmp && ccache --set-config=temporary_dir=/tmp/ccache-tmp
+```
 
 ## API Tests
 
