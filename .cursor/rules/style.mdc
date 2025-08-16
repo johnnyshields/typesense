@@ -1,7 +1,16 @@
+---
+description: Coding style and conventions used in the Typesense C++ codebase
+globs:
+alwaysApply: true
+---
 
 # C++ Style Guide for Typesense
 
 This document outlines the coding style and conventions used in the Typesense C++ codebase.
+
+## Summary
+
+The Typesense C++ codebase is a modern, high-performance search engine implementation that heavily utilizes templates, smart pointers, and contemporary C++ features. Key architectural patterns include singleton classes with `get_instance()` methods, `Option<T>` wrappers for comprehensive error handling, RAII guard classes for automatic resource management, and extensive use of `std::shared_mutex` for thread-safe operations. The codebase follows consistent naming conventions: snake_case for functions and variables, PascalCase for classes and structs, and SCREAMING_SNAKE_CASE for constants with descriptive prefixes. Memory management combines smart pointers (`std::shared_ptr`, `std::unique_ptr`) for ownership with raw pointers for non-owning references, while constructors consistently use member initialization lists and the codebase maintains strict const-correctness throughout.
 
 ## File Organization
 

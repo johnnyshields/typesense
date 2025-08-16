@@ -1,0 +1,187 @@
+---
+description: Testing standards and philosophy
+globs:
+alwaysApply: true
+---
+
+# Testing Standards
+
+## Testing Framework and Structure
+
+- Use **Google Test** (`gtest`) framework for all C++ unit tests
+- Create test fixture classes inheriting from `::testing::Test` for related tests
+- Use `TEST_F` for fixture-based tests and `TEST` for standalone tests
+- Implement proper `SetUp()` and `TearDown()` methods for resource management
+
+```cpp
+class AuthManagerTest : public ::testing::Test {
+protected:
+    Store* store;
+    AuthManager auth_manager;
+
+    void SetUp() override {
+        std::string state_dir_path = "/tmp/typesense_test/auth_manager_test_db";
+        system(("rm -rf " + state_dir_path + " && mkdir -p " + state_dir_path).c_str());
+
+        store = new Store(state_dir_path);
+        auth_manager.init(store, "bootstrap-key");
+    }
+
+    void TearDown() override {
+        delete store;
+    }
+};
+```
+
+## Test Design Principles
+
+### Mission-Oriented Testing
+
+- Each test should focus on **one specific behavior or functionality**
+- Test names must clearly describe the expected behavior being verified
+- Avoid testing multiple unrelated functionalities in a single test
+
+```cpp
+// Good: Focused on specific behavior
+TEST_F(AuthManagerTest, CreateAPIKeyRejectsConflictingValues) { ... }
+TEST_F(AuthManagerTest, CreateAPIKeySucceedsWithValidInput) { ... }
+
+// Bad: Testing multiple behaviors
+TEST_F(AuthManagerTest, APIKeyOperations) { ... }  // Too broad
+```
+
+### Comprehensive Path Testing
+
+- **Always test both success paths and failure scenarios** for every function
+- Create separate, dedicated tests for each error condition rather than combining them
+- Verify specific error codes and messages for failure cases
+
+```cpp
+// Success case
+TEST_F(AuthManagerTest, CreateAPIKeySucceeds) {
+    api_key_t api_key("valid_key", "description", {"read"}, {"collection1"}, FUTURE_TS);
+    auto result = auth_manager.create_key(api_key);
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ("valid_key", result.get().value);
+}
+
+// Failure case - separate test
+TEST_F(AuthManagerTest, CreateAPIKeyRejectsConflict) {
+    api_key_t api_key("duplicate_key", "desc", {"read"}, {"coll"}, FUTURE_TS);
+    auth_manager.create_key(api_key);  // First insertion
+
+    auto conflict_result = auth_manager.create_key(api_key);  // Duplicate
+    ASSERT_FALSE(conflict_result.ok());
+    ASSERT_EQ(409, conflict_result.code());
+    ASSERT_EQ("API key generation conflict.", conflict_result.error());
+}
+```
+
+### Avoid Conditional Testing Logic
+
+- **Never use if/try-catch statements for conditional testing within test functions**
+- If multiple branches need testing, create separate tests for each branch
+- Each test should follow a linear execution path with deterministic assertions
+
+```cpp
+// Bad: Conditional logic in test
+TEST_F(CollectionTest, DocumentOperations) {
+    auto result = collection->add(json_doc);
+    if (result.ok()) {
+        ASSERT_EQ(expected_id, result.get()["id"]);
+    } else {
+        FAIL() << "Document addition failed unexpectedly";
+    }
+}
+
+// Good: Separate focused tests
+TEST_F(CollectionTest, AddDocumentSucceedsWithValidInput) {
+    auto result = collection->add(valid_json_doc);
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(expected_id, result.get()["id"]);
+}
+
+TEST_F(CollectionTest, AddDocumentFailsWithInvalidInput) {
+    auto result = collection->add(invalid_json_doc);
+    ASSERT_FALSE(result.ok());
+    ASSERT_EQ(400, result.code());
+}
+```
+
+### Prefer Real Objects Over Mocks
+
+- **Avoid mocking when possible** - instantiate real objects rather than using mock frameworks
+- Use actual implementations to test genuine integration and behavior
+- Only mock external dependencies that are expensive, slow, or unavailable (network services, file systems)
+- When mocking is necessary, keep mocks simple and focused on specific behaviors
+
+## Assertion Patterns
+
+### Result Validation
+
+- Use `ASSERT_TRUE(result.ok())` for success cases
+- Use `ASSERT_FALSE(result.ok())` for failure cases
+- Always verify specific error codes: `ASSERT_EQ(expected_code, result.code())`
+- Validate error messages: `ASSERT_EQ("Expected message", result.error())`
+
+### Value Assertions
+
+- Use `ASSERT_EQ` for exact equality comparisons
+- Use `ASSERT_STREQ` for C-style string comparisons
+- Use `EXPECT_*` variants when test should continue after assertion failure
+- Use `ASSERT_*` variants when test should stop after assertion failure
+
+## Edge Case and Error Testing
+
+### Comprehensive Input Validation
+
+- Test **all invalid input combinations** (wrong types, missing fields, empty values)
+- Verify boundary conditions (min/max values, size limits)
+- Test malformed data and unexpected formats
+
+```cpp
+TEST_F(ConversationTest, RejectsInvalidModelConfiguration) {
+    // Test missing required field
+    nlohmann::json config_missing_name = R"({"history_collection": "store"})"_json;
+    auto result1 = validator.validate_model(config_missing_name);
+    ASSERT_FALSE(result1.ok());
+    ASSERT_EQ(400, result1.code());
+    ASSERT_EQ("Property `model_name` is not provided or not a string.", result1.error());
+
+    // Test wrong data type
+    nlohmann::json config_wrong_type = R"({"model_name": 123, "history_collection": "store"})"_json;
+    auto result2 = validator.validate_model(config_wrong_type);
+    ASSERT_FALSE(result2.ok());
+    ASSERT_EQ(400, result2.code());
+}
+```
+
+### Resource and State Testing
+
+- Test resource cleanup and proper state management
+- Verify behavior with empty collections, missing files, network failures
+- Test concurrent access scenarios where applicable
+
+## Test Organization
+
+### File and Directory Structure
+
+- Follow the same directory structure as the source code
+- Name test files with `_test.cpp` suffix
+- Group related tests in the same fixture class
+- Use descriptive test names that explain the expected behavior
+
+### Test Data Management
+
+- Use fixture files in `test/resources/` for test data
+- Clean up temporary files and directories in `TearDown()`
+- Use deterministic test data rather than random generation where possible
+- Create separate test data files for different test scenarios
+
+## Performance and Integration Testing
+
+- Include performance benchmarks for critical path operations
+- Test integration points between major components
+- Verify system behavior under load and stress conditions
+- Test failure recovery and graceful degradation scenarios

@@ -1,7 +1,7 @@
 ---
 description: How to build and test
 globs:
-alwaysApply: false
+alwaysApply: true
 ---
 
 # Build & Test
