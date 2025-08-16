@@ -1,7 +1,10 @@
 ---
 description: Testing standards and philosophy
 globs:
-alwaysApply: true
+  - "api_tests/**"
+  - "test/**"
+  - "tests/**"
+  - "benchmark/**"
 ---
 
 # Testing Standards

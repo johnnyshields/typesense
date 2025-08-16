@@ -1,7 +1,8 @@
 ---
 description: Coding style and conventions used in the Typesense C++ codebase
 globs:
-alwaysApply: true
+  - "include/**"
+  - "src/**"
 ---
 
 # C++ Style Guide for Typesense
