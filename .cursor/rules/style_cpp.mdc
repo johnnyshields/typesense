@@ -214,7 +214,7 @@ collection_search_args_t(std::string raw_query,
 - **No space**: Between function and parens `function()`
 - **Auto usage**: Avoid when type provides important context
 - **Namespaces**: Lowercase with underscores, avoid deep nesting
-- **Comments**: `//` style, placed above code, TODO/FIXME for notes
+- **Comments**: `//` style, placed above code, TODO/FIXME for notes, avoid `/** */`
 - **Enums**: Prefer `enum class` over plain enums
 
 ## Class Member Organization
