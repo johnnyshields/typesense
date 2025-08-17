@@ -129,13 +129,14 @@ LOCAL_MODS=$(git status --porcelain | wc -l)
 if [ $LOCAL_MODS -gt 0 ]; then
     # Local modifications detected - add binary hash suffix (industry standard)
     BINARY_HASH=$(md5sum ../bazel-bin/typesense-server | cut -c1-4)
-    LOCAL_BINARY_NAME="typesense-server-$CURRENT_COMMIT-$BINARY_HASH"
-    echo "Local modifications detected, using: $LOCAL_BINARY_NAME"
+    LOCAL_COMMIT="$CURRENT_COMMIT-$BINARY_HASH"
+    LOCAL_BINARY="typesense-server-$LOCAL_COMMIT"
+    echo "Local modifications detected, using: $LOCAL_BINARY"
 else
-    LOCAL_BINARY_NAME="typesense-server-$CURRENT_COMMIT"
+    LOCAL_COMMIT=$CURRENT_COMMIT
+    LOCAL_BINARY="typesense-server-$LOCAL_COMMIT"
 fi
-
-cp ../bazel-bin/typesense-server ./binaries/$LOCAL_BINARY_NAME
+cp ../bazel-bin/typesense-server ./binaries/$LOCAL_BINARY
 
 # Download official release binary for comparison
 # Check https://typesense.org/downloads for latest version on location (look for Linux > Binary (x64/arm64)
@@ -154,16 +155,12 @@ echo '{"documents": [{"id": "1", "name": "test document", "description": "sample
 
 ```bash
 # Run benchmark comparing local vs official release
-# Use the binaries created in setup step above
-
-# Get the local binary name (will have commit hash and possibly binary hash)
-LOCAL_BINARY=$(ls ./binaries/typesense-server-*
-LOCAL_NAME=$(basename $LOCAL_BINARY | sed 's/typesense-server-//')
+# Use the binaries and LOCAL_COMMIT/LOCAL_BINARY from setup step above
 
 # Run benchmark with proper commit hashes
 ts-cli benchmark \
-  --binaries $LOCAL_BINARY ./binaries/typesense-server-v<X.Y> \
-  --commitHashes $LOCAL_NAME v<X.Y> \
+  --binaries ./binaries/$LOCAL_BINARY ./binaries/typesense-server-v<X.Y> \
+  --commitHashes $LOCAL_COMMIT v<X.Y> \
   --duration 30s --batch-size 100 --verbose
 ```
 
