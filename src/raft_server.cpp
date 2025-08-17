@@ -1,4 +1,4 @@
-#include "raft_state_machine.h"
+#include "raft_server.h"
 #include "raft_config.h"
 #include "raft_http.h"
 #include "store.h"
@@ -21,14 +21,14 @@
 // RAFT STATE MACHINE
 // ============================================================================
 //
-// This file implements the full RaftStateMachine class that serves as:
+// This file implements the full RaftServer class that serves as:
 // 1. HTTP Request Processing Layer - handles HTTP validation, routing, forwarding
 // 2. braft::StateMachine Interface - processes Raft log entries and snapshots
 // 3. Application Business Logic - coordinates between storage, indexing, and HTTP
 // 4. Integration Point - bridges RaftNodeManager with application components
 //
 // Architecture:
-//   HTTP Requests → RaftStateMachine (business validation) → Raft Log →
+//   HTTP Requests → RaftServer (business validation) → Raft Log →
 //   on_apply() → BatchedIndexer → Store → Database
 
 namespace braft {
@@ -44,7 +44,7 @@ namespace braft {
 // CONSTRUCTOR & INITIALIZATION
 // ============================================================================
 
-RaftStateMachine::RaftStateMachine(HttpServer* server, BatchedIndexer* batched_indexer,
+RaftServer::RaftServer(HttpServer* server, BatchedIndexer* batched_indexer,
                                    Store *store, Store* analytics_store, ThreadPool* thread_pool,
                                    http_message_dispatcher *message_dispatcher,
                                    bool api_uses_ssl, const Config* config,
@@ -62,10 +62,10 @@ RaftStateMachine::RaftStateMachine(HttpServer* server, BatchedIndexer* batched_i
 
     node_manager = std::make_unique<RaftNodeManager>(config, store, batched_indexer, api_uses_ssl);
 
-    LOG(INFO) << "RaftStateMachine initialized";
+    LOG(INFO) << "RaftServer initialized";
 }
 
-int RaftStateMachine::start(const butil::EndPoint& peering_endpoint,
+int RaftServer::start(const butil::EndPoint& peering_endpoint,
                             int api_port,
                             int election_timeout_ms,
                             int snapshot_max_byte_count_per_rpc,
@@ -73,7 +73,7 @@ int RaftStateMachine::start(const butil::EndPoint& peering_endpoint,
                             const std::string& nodes,
                             const std::atomic<bool>& quit_abruptly) {
 
-    LOG(INFO) << "Starting RaftStateMachine";
+    LOG(INFO) << "Starting RaftServer";
 
     // Configure braft flags
     braft::FLAGS_raft_do_snapshot_min_index_gap = 1;
@@ -106,12 +106,12 @@ int RaftStateMachine::start(const butil::EndPoint& peering_endpoint,
         return -1;
     }
 
-    LOG(INFO) << "RaftStateMachine started successfully";
+    LOG(INFO) << "RaftServer started successfully";
     return 0;
 }
 
 // Initialize database after node is ready (called after Raft node startup)
-int RaftStateMachine::init_db() {
+int RaftServer::init_db() {
     LOG(INFO) << "Loading collections from disk...";
 
     Option<bool> init_op = CollectionManager::get_instance().load(
@@ -160,7 +160,7 @@ int RaftStateMachine::init_db() {
 // ============================================================================
 
 // Primary entry point for write requests from HTTP layer
-void RaftStateMachine::write(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response) {
+void RaftServer::write(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response) {
     // Shutdown Check
     if(shutting_down) {
         response->set_503("Shutting down.");
@@ -240,13 +240,13 @@ void RaftStateMachine::write(const std::shared_ptr<http_req>& request, const std
     pending_writes++;
 }
 
-void RaftStateMachine::read(const std::shared_ptr<http_res>& response) {
+void RaftServer::read(const std::shared_ptr<http_res>& response) {
     // NOT USED: For consistency, reads to followers could be rejected.
     // Currently, we don't implement reads via raft - they go directly to followers.
 }
 
 // Handle write requests when this node is not the leader
-void RaftStateMachine::write_to_leader(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response) {
+void RaftServer::write_to_leader(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response) {
     if(!node_manager) {
         response->set_500("Node manager not initialized.");
         auto req_res = new async_req_res_t(request, response, true);
@@ -345,7 +345,7 @@ void RaftStateMachine::write_to_leader(const std::shared_ptr<http_req>& request,
 // NODE MANAGEMENT DELEGATION (to RaftNodeManager)
 // ============================================================================
 
-void RaftStateMachine::refresh_nodes(const std::string& nodes, size_t raft_counter,
+void RaftServer::refresh_nodes(const std::string& nodes, size_t raft_counter,
                                    const std::atomic<bool>& reset_peers_on_error) {
     if (node_manager) {
         bool allow_single_node_reset = (raft_counter > 0 && reset_peers_on_error.load());
@@ -353,13 +353,13 @@ void RaftStateMachine::refresh_nodes(const std::string& nodes, size_t raft_count
     }
 }
 
-void RaftStateMachine::refresh_catchup_status(bool log_msg) {
+void RaftServer::refresh_catchup_status(bool log_msg) {
     if (node_manager) {
         node_manager->refresh_catchup_status(log_msg);
     }
 }
 
-bool RaftStateMachine::trigger_vote() {
+bool RaftServer::trigger_vote() {
     if (node_manager) {
         auto status = node_manager->trigger_vote();
         LOG(INFO) << "Triggered vote. Ok? " << status.ok() << ", status: " << status;
@@ -368,7 +368,7 @@ bool RaftStateMachine::trigger_vote() {
     return false;
 }
 
-bool RaftStateMachine::reset_peers() {
+bool RaftServer::reset_peers() {
     if(!node_manager) {
         return false;
     }
@@ -397,13 +397,13 @@ bool RaftStateMachine::reset_peers() {
     return status.ok();
 }
 
-void RaftStateMachine::persist_applying_index() {
+void RaftServer::persist_applying_index() {
     if(batched_indexer) {
         batched_indexer->persist_applying_index();
     }
 }
 
-uint64_t RaftStateMachine::node_state() const {
+uint64_t RaftServer::node_state() const {
     if(!node_manager) {
         return 0;
     }
@@ -417,7 +417,7 @@ uint64_t RaftStateMachine::node_state() const {
 // SNAPSHOT MANAGEMENT (Application-Level)
 // ============================================================================
 
-void RaftStateMachine::do_snapshot(const std::string& snapshot_path, const std::shared_ptr<http_req>& req,
+void RaftServer::do_snapshot(const std::string& snapshot_path, const std::shared_ptr<http_req>& req,
                                    const std::shared_ptr<http_res>& res) {
     if(!node_manager) {
         res->set_500("Could not trigger a snapshot, as node manager is not initialized.");
@@ -444,7 +444,7 @@ void RaftStateMachine::do_snapshot(const std::string& snapshot_path, const std::
     });
 }
 
-void RaftStateMachine::do_snapshot(const std::string& nodes) {
+void RaftServer::do_snapshot(const std::string& nodes) {
     auto current_ts = std::time(nullptr);
     if(current_ts - last_snapshot_ts < snapshot_interval_s) {
         return;
@@ -503,7 +503,7 @@ void RaftStateMachine::do_snapshot(const std::string& nodes) {
 // ============================================================================
 
 // Apply committed entries to the state machine (core Raft callback)
-void RaftStateMachine::on_apply(braft::Iterator& iter) {
+void RaftServer::on_apply(braft::Iterator& iter) {
     // NOTE: this is executed on a different thread and runs concurrent to http thread
     for(; iter.valid(); iter.next()) {
         // Guard invokes done->Run() asynchronously to avoid blocking
@@ -534,7 +534,7 @@ void RaftStateMachine::on_apply(braft::Iterator& iter) {
 }
 
 // Create snapshot of current state machine (core Raft callback)
-void RaftStateMachine::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
+void RaftServer::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
     LOG(INFO) << "on_snapshot_save";
 
     snapshot_in_progress = true;
@@ -599,7 +599,7 @@ void RaftStateMachine::on_snapshot_save(braft::SnapshotWriter* writer, braft::Cl
 }
 
 // Load snapshot to restore state machine (core Raft callback)
-int RaftStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
+int RaftServer::on_snapshot_load(braft::SnapshotReader* reader) {
     // Critical safety check - leader should NEVER load a snapshot
     CHECK(!node_manager || !node_manager->is_leader())
         << "Leader is not supposed to load snapshot";
@@ -643,7 +643,7 @@ int RaftStateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
 // INTERNAL UTILITY METHODS
 // ============================================================================
 
-void RaftStateMachine::shutdown() {
+void RaftServer::shutdown() {
     LOG(INFO) << "Set shutting_down = true";
     shutting_down = true;
 
@@ -654,7 +654,7 @@ void RaftStateMachine::shutdown() {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
 
-    LOG(INFO) << "RaftStateMachine shutdown, store sequence: " << store->get_latest_seq_number();
+    LOG(INFO) << "RaftServer shutdown, store sequence: " << store->get_latest_seq_number();
 
     // Shutdown the RaftNodeManager
     if (node_manager) {
@@ -662,7 +662,7 @@ void RaftStateMachine::shutdown() {
     }
 }
 
-void RaftStateMachine::do_dummy_write() {
+void RaftServer::do_dummy_write() {
     if(!node_manager) {
         LOG(ERROR) << "Could not do a dummy write, as node manager is not initialized";
         return;
@@ -685,7 +685,7 @@ void RaftStateMachine::do_dummy_write() {
 }
 
 // Static method for snapshot file operations (runs in separate thread)
-void* RaftStateMachine::save_snapshot(void* arg) {
+void* RaftServer::save_snapshot(void* arg) {
     LOG(INFO) << "save_snapshot called";
 
     SnapshotArg* sa = static_cast<SnapshotArg*>(arg);
@@ -737,7 +737,7 @@ void ReplicationClosure::Run() {
     std::unique_ptr<ReplicationClosure> self_guard(this);
 }
 
-OnDemandSnapshotClosure::OnDemandSnapshotClosure(RaftStateMachine* replication_state,
+OnDemandSnapshotClosure::OnDemandSnapshotClosure(RaftServer* replication_state,
                                                  const std::shared_ptr<http_req>& req,
                                                  const std::shared_ptr<http_res>& res,
                                                  const std::string& ext_snapshot_path,
@@ -806,7 +806,7 @@ void OnDemandSnapshotClosure::Run() {
     res->wait();
 }
 
-TimedSnapshotClosure::TimedSnapshotClosure(RaftStateMachine* replication_state)
+TimedSnapshotClosure::TimedSnapshotClosure(RaftServer* replication_state)
     : replication_state(replication_state) {}
 
 void TimedSnapshotClosure::Run() {

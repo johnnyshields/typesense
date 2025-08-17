@@ -8,7 +8,7 @@
 #include "butil/at_exit.h"
 #include "brpc/server.h"
 #include "braft/raft.h"
-#include "raft_state_machine.h"
+#include "raft_server.h"
 #include "http_server.h"
 #include "batched_indexer.h"
 #include "store.h"
@@ -23,7 +23,7 @@ public:
     ConfigImpl(): Config() {}
 };
 
-class RaftStateMachineTest : public ::testing::Test {
+class RaftServerTest : public ::testing::Test {
 protected:
     std::unique_ptr<butil::AtExitManager> exit_manager;
     std::vector<std::unique_ptr<brpc::Server>> raft_servers;
@@ -43,7 +43,7 @@ protected:
         exit_manager = std::make_unique<butil::AtExitManager>();
 
         // Create test directory
-        test_dir = "/tmp/typesense_test/raft_state_machine";
+        test_dir = "/tmp/typesense_test/raft_server";
         std::filesystem::remove_all(test_dir);
         std::filesystem::create_directories(test_dir);
 
@@ -94,8 +94,8 @@ protected:
         std::filesystem::remove_all(test_dir);
     }
 
-    std::unique_ptr<RaftStateMachine> createRaftStateMachine() {
-        return std::make_unique<RaftStateMachine>(
+    std::unique_ptr<RaftServer> createRaftServer() {
+        return std::make_unique<RaftServer>(
             http_server, batched_indexer, store, analytics_store,
             thread_pool, message_dispatcher, false, config, 4, 1000
         );
@@ -116,18 +116,18 @@ protected:
     }
 };
 
-TEST_F(RaftStateMachineTest, Constructor) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, Constructor) {
+    auto raft_server = createRaftServer();
 
-    EXPECT_NE(raft_state_machine, nullptr);
-    EXPECT_EQ(raft_state_machine->get_store(), store);
-    EXPECT_EQ(raft_state_machine->get_config(), config);
-    EXPECT_EQ(raft_state_machine->get_batched_indexer(), batched_indexer);
-    EXPECT_EQ(raft_state_machine->get_message_dispatcher(), message_dispatcher);
+    EXPECT_NE(raft_server, nullptr);
+    EXPECT_EQ(raft_server->get_store(), store);
+    EXPECT_EQ(raft_server->get_config(), config);
+    EXPECT_EQ(raft_server->get_batched_indexer(), batched_indexer);
+    EXPECT_EQ(raft_server->get_message_dispatcher(), message_dispatcher);
 }
 
-TEST_F(RaftStateMachineTest, Start) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, Start) {
+    auto raft_server = createRaftServer();
 
     // Set up raft startup parameters
     butil::EndPoint peering_endpoint;
@@ -147,32 +147,32 @@ TEST_F(RaftStateMachineTest, Start) {
     std::filesystem::create_directories(raft_dir + "/snapshot");
 
     // Set up RPC server for this endpoint
-    createRaftServer(peering_endpoint);
 
-    // RaftStateMachine should start successfully
-    int start_result = raft_state_machine->start(peering_endpoint, api_port, election_timeout_ms,
-                                                snapshot_max_byte_count_per_rpc, raft_dir,
-                                                nodes_config, quit_abruptly);
+
+    // RaftServer should start successfully
+    int start_result = raft_server->start(peering_endpoint, api_port, election_timeout_ms,
+                                          snapshot_max_byte_count_per_rpc, raft_dir,
+                                          nodes_config, quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Refresh status to ensure ready flags are updated
-    raft_state_machine->refresh_catchup_status(true);
+    raft_server->refresh_catchup_status(true);
 
     // State machine should be alive and ready
-    EXPECT_TRUE(raft_state_machine->is_alive());
+    EXPECT_TRUE(raft_server->is_alive());
 
     // Should have proper raft state
-    auto status = raft_state_machine->get_status();
+    auto status = raft_server->get_status();
     EXPECT_TRUE(status.contains("state"));
     std::string state = status["state"];
     EXPECT_TRUE(state == "LEADER" || state == "FOLLOWER" || state == "CANDIDATE");
 
-    raft_state_machine->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
-TEST_F(RaftStateMachineTest, IsAlive) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, IsAlive) {
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9002, &peering_endpoint);
@@ -186,30 +186,30 @@ TEST_F(RaftStateMachineTest, IsAlive) {
 
     createRaftServer(peering_endpoint);
 
-    int start_result = raft_state_machine->start(peering_endpoint, 9003, 1000,
-                                                128 * 1024, raft_dir,
-                                                "127.0.0.1:9002:9003", quit_abruptly);
+    int start_result = raft_server->start(peering_endpoint, 9003, 1000,
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9002:9003", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Refresh status to ensure ready flags are updated
-    raft_state_machine->refresh_catchup_status(true);
+    raft_server->refresh_catchup_status(true);
 
     // Should be alive after starting
-    EXPECT_TRUE(raft_state_machine->is_alive());
+    EXPECT_TRUE(raft_server->is_alive());
 
-    raft_state_machine->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
-TEST_F(RaftStateMachineTest, IsAliveWithoutStarting) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, IsAliveWithoutStarting) {
+    auto raft_server = createRaftServer();
 
     // Initially not alive
-    EXPECT_FALSE(raft_state_machine->is_alive());
+    EXPECT_FALSE(raft_server->is_alive());
 }
 
-TEST_F(RaftStateMachineTest, IsLeader) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, IsLeader) {
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9004, &peering_endpoint);
@@ -223,33 +223,33 @@ TEST_F(RaftStateMachineTest, IsLeader) {
 
     createRaftServer(peering_endpoint);
 
-    int start_result = raft_state_machine->start(peering_endpoint, 9005, 800,
-                                                128 * 1024, raft_dir,
-                                                "127.0.0.1:9004:9005", quit_abruptly);
+    int start_result = raft_server->start(peering_endpoint, 9005, 800,
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9004:9005", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for leader election to complete
     std::this_thread::sleep_for(std::chrono::milliseconds(2500));
 
     // Single node should elect itself as leader
-    EXPECT_TRUE(raft_state_machine->is_leader());
+    EXPECT_TRUE(raft_server->is_leader());
 
-    auto status = raft_state_machine->get_status();
+    auto status = raft_server->get_status();
     EXPECT_EQ(status["state"], "LEADER");
 
-    raft_state_machine->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
-TEST_F(RaftStateMachineTest, IsLeaderWithoutStarting) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, IsLeaderWithoutStarting) {
+    auto raft_server = createRaftServer();
 
     // Initially not leader
-    EXPECT_FALSE(raft_state_machine->is_leader());
+    EXPECT_FALSE(raft_server->is_leader());
 }
 
-TEST_F(RaftStateMachineTest, ReadWriteCaughtUp) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, ReadWriteCaughtUp) {
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9006, &peering_endpoint);
@@ -263,35 +263,35 @@ TEST_F(RaftStateMachineTest, ReadWriteCaughtUp) {
 
     createRaftServer(peering_endpoint);
 
-    int start_result = raft_state_machine->start(peering_endpoint, 9007, 1000,
-                                                128 * 1024, raft_dir,
-                                                "127.0.0.1:9006:9007", quit_abruptly);
+    int start_result = raft_server->start(peering_endpoint, 9007, 1000,
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9006:9007", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for leader election
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // Refresh status to ensure ready flags are updated
-    raft_state_machine->refresh_catchup_status(true);
+    raft_server->refresh_catchup_status(true);
 
     // Should be ready for operations
-    EXPECT_TRUE(raft_state_machine->is_read_caught_up());
-    EXPECT_TRUE(raft_state_machine->is_write_caught_up());
+    EXPECT_TRUE(raft_server->is_read_caught_up());
+    EXPECT_TRUE(raft_server->is_write_caught_up());
 
-    raft_state_machine->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
-TEST_F(RaftStateMachineTest, ReadWriteCaughtUpWithoutStarting) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, ReadWriteCaughtUpWithoutStarting) {
+    auto raft_server = createRaftServer();
 
     // Initially not ready
-    EXPECT_FALSE(raft_state_machine->is_read_caught_up());
-    EXPECT_FALSE(raft_state_machine->is_write_caught_up());
+    EXPECT_FALSE(raft_server->is_read_caught_up());
+    EXPECT_FALSE(raft_server->is_write_caught_up());
 }
 
-TEST_F(RaftStateMachineTest, GetStatus) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, GetStatus) {
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9008, &peering_endpoint);
@@ -305,27 +305,27 @@ TEST_F(RaftStateMachineTest, GetStatus) {
 
     createRaftServer(peering_endpoint);
 
-    int start_result = raft_state_machine->start(peering_endpoint, 9009, 1000,
-                                                128 * 1024, raft_dir,
-                                                "127.0.0.1:9008:9009", quit_abruptly);
+    int start_result = raft_server->start(peering_endpoint, 9009, 1000,
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9008:9009", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for startup to complete
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));
 
     // Should be able to get status
-    auto status = raft_state_machine->get_status();
+    auto status = raft_server->get_status();
     EXPECT_TRUE(status.contains("state"));
 
-    raft_state_machine->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
-TEST_F(RaftStateMachineTest, GetStatusWithoutStarting) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, GetStatusWithoutStarting) {
+    auto raft_server = createRaftServer();
 
     // Get status JSON
-    auto status = raft_state_machine->get_status();
+    auto status = raft_server->get_status();
 
     // Should contain expected keys
     EXPECT_TRUE(status.contains("state"));
@@ -343,8 +343,8 @@ TEST_F(RaftStateMachineTest, GetStatusWithoutStarting) {
     EXPECT_EQ(status["write_ready"], false);
 }
 
-TEST_F(RaftStateMachineTest, GetLeaderUrl) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, GetLeaderUrl) {
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9010, &peering_endpoint);
@@ -358,32 +358,32 @@ TEST_F(RaftStateMachineTest, GetLeaderUrl) {
 
     createRaftServer(peering_endpoint);
 
-    int start_result = raft_state_machine->start(peering_endpoint, 9011, 1000,
-                                                128 * 1024, raft_dir,
-                                                "127.0.0.1:9010:9011", quit_abruptly);
+    int start_result = raft_server->start(peering_endpoint, 9011, 1000,
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9010:9011", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for leader election
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // Should have leader URL
-    auto leader_url = raft_state_machine->get_leader_url();
+    auto leader_url = raft_server->get_leader_url();
     EXPECT_FALSE(leader_url.empty());
 
-    raft_state_machine->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
-TEST_F(RaftStateMachineTest, GetLeaderUrlWithoutStarting) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, GetLeaderUrlWithoutStarting) {
+    auto raft_server = createRaftServer();
 
     // No leader initially
-    auto leader_url = raft_state_machine->get_leader_url();
+    auto leader_url = raft_server->get_leader_url();
     EXPECT_TRUE(leader_url.empty());
 }
 
-TEST_F(RaftStateMachineTest, HasLeaderTerm) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, HasLeaderTerm) {
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9012, &peering_endpoint);
@@ -397,31 +397,31 @@ TEST_F(RaftStateMachineTest, HasLeaderTerm) {
 
     createRaftServer(peering_endpoint);
 
-    int start_result = raft_state_machine->start(peering_endpoint, 9013, 1000,
-                                                128 * 1024, raft_dir,
-                                                "127.0.0.1:9012:9013", quit_abruptly);
+    int start_result = raft_server->start(peering_endpoint, 9013, 1000,
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9012:9013", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for leader election
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // Should have leader term
-    EXPECT_TRUE(raft_state_machine->has_leader_term());
+    EXPECT_TRUE(raft_server->has_leader_term());
 
-    raft_state_machine->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
-TEST_F(RaftStateMachineTest, HasLeaderTermWithoutStarting) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, HasLeaderTermWithoutStarting) {
+    auto raft_server = createRaftServer();
 
     // No leader initially
-    bool has_leader = raft_state_machine->has_leader_term();
+    bool has_leader = raft_server->has_leader_term();
     EXPECT_FALSE(has_leader);
 }
 
-TEST_F(RaftStateMachineTest, Write) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, Write) {
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9014, &peering_endpoint);
@@ -435,23 +435,23 @@ TEST_F(RaftStateMachineTest, Write) {
 
     createRaftServer(peering_endpoint);
 
-    int start_result = raft_state_machine->start(peering_endpoint, 9015, 1000,
-                                                128 * 1024, raft_dir,
-                                                "127.0.0.1:9014:9015", quit_abruptly);
+    int start_result = raft_server->start(peering_endpoint, 9015, 1000,
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9014:9015", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for leader election
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // Node should become leader
-    EXPECT_TRUE(raft_state_machine->is_leader());
+    EXPECT_TRUE(raft_server->is_leader());
 
     // Refresh status to ensure ready flags are updated
-    raft_state_machine->refresh_catchup_status(true);
+    raft_server->refresh_catchup_status(true);
 
     // Should be ready for operations
-    EXPECT_TRUE(raft_state_machine->is_read_caught_up());
-    EXPECT_TRUE(raft_state_machine->is_write_caught_up());
+    EXPECT_TRUE(raft_server->is_read_caught_up());
+    EXPECT_TRUE(raft_server->is_write_caught_up());
 
     // Test write request processing
     auto request = std::make_shared<http_req>();
@@ -466,17 +466,17 @@ TEST_F(RaftStateMachineTest, Write) {
     response->final = false;
 
     // Write request should be processed
-    raft_state_machine->write(request, response);
+    raft_server->write(request, response);
 
     // Give time for async processing
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    raft_state_machine->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
-TEST_F(RaftStateMachineTest, WriteWithoutStarting) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, WriteWithoutStarting) {
+    auto raft_server = createRaftServer();
 
     // Create test request and response
     auto request = std::make_shared<http_req>();
@@ -490,33 +490,33 @@ TEST_F(RaftStateMachineTest, WriteWithoutStarting) {
     response->final = false;
 
     // This should not crash even without a started node
-    raft_state_machine->write(request, response);
+    raft_server->write(request, response);
 
     // Response should have error status code (since no leader found)
     EXPECT_EQ(response->status_code, 500);
     EXPECT_NE(response->body.find("Could not find a leader"), std::string::npos);
 }
 
-TEST_F(RaftStateMachineTest, InitDb) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, InitDb) {
+    auto raft_server = createRaftServer();
 
     // Database initialization should succeed
-    int init_result = raft_state_machine->init_db();
+    int init_result = raft_server->init_db();
     EXPECT_EQ(init_result, 0);
 
     // State machine should remain functional after init_db
-    EXPECT_NE(raft_state_machine, nullptr);
+    EXPECT_NE(raft_server, nullptr);
 
     // Should be able to get status after initialization
-    auto status = raft_state_machine->get_status();
+    auto status = raft_server->get_status();
     EXPECT_TRUE(status.contains("state"));
 
     // Other operations should work correctly
-    EXPECT_FALSE(raft_state_machine->is_alive());
+    EXPECT_FALSE(raft_server->is_alive());
 }
 
-TEST_F(RaftStateMachineTest, TriggerVote) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, TriggerVote) {
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9016, &peering_endpoint);
@@ -530,32 +530,32 @@ TEST_F(RaftStateMachineTest, TriggerVote) {
 
     createRaftServer(peering_endpoint);
 
-    int start_result = raft_state_machine->start(peering_endpoint, 9017, 800,
-                                                128 * 1024, raft_dir,
-                                                "127.0.0.1:9016:9017", quit_abruptly);
+    int start_result = raft_server->start(peering_endpoint, 9017, 800,
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9016:9017", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for leader election
     std::this_thread::sleep_for(std::chrono::milliseconds(2500));
 
     // Should be able to trigger vote (no-op for leader)
-    raft_state_machine->trigger_vote();
+    raft_server->trigger_vote();
     // Result depends on node state
 
-    raft_state_machine->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
-TEST_F(RaftStateMachineTest, TriggerVoteWithoutStarting) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, TriggerVoteWithoutStarting) {
+    auto raft_server = createRaftServer();
 
     // Should fail without initialized node
-    bool vote_result = raft_state_machine->trigger_vote();
+    bool vote_result = raft_server->trigger_vote();
     EXPECT_FALSE(vote_result);
 }
 
-TEST_F(RaftStateMachineTest, ResetPeers) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, ResetPeers) {
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9018, &peering_endpoint);
@@ -569,32 +569,32 @@ TEST_F(RaftStateMachineTest, ResetPeers) {
 
     createRaftServer(peering_endpoint);
 
-    int start_result = raft_state_machine->start(peering_endpoint, 9019, 1000,
-                                                128 * 1024, raft_dir,
-                                                "127.0.0.1:9018:9019", quit_abruptly);
+    int start_result = raft_server->start(peering_endpoint, 9019, 1000,
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9018:9019", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for node to be ready
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // reset_peers should work
-    raft_state_machine->reset_peers();
+    raft_server->reset_peers();
     // Result depends on implementation
 
-    raft_state_machine->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
-TEST_F(RaftStateMachineTest, ResetPeersWithoutStarting) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, ResetPeersWithoutStarting) {
+    auto raft_server = createRaftServer();
 
     // Should fail without initialized node
-    bool reset_result = raft_state_machine->reset_peers();
+    bool reset_result = raft_server->reset_peers();
     EXPECT_FALSE(reset_result);
 }
 
-TEST_F(RaftStateMachineTest, RefreshNodes) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, RefreshNodes) {
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9020, &peering_endpoint);
@@ -608,9 +608,9 @@ TEST_F(RaftStateMachineTest, RefreshNodes) {
 
     createRaftServer(peering_endpoint);
 
-    int start_result = raft_state_machine->start(peering_endpoint, 9021, 1000,
-                                                128 * 1024, raft_dir,
-                                                "127.0.0.1:9020:9021", quit_abruptly);
+    int start_result = raft_server->start(peering_endpoint, 9021, 1000,
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9020:9021", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for cluster to be ready
@@ -621,33 +621,33 @@ TEST_F(RaftStateMachineTest, RefreshNodes) {
     std::atomic<bool> reset_peers{false};
 
     // refresh_nodes should work
-    raft_state_machine->refresh_nodes(nodes_config, 0, reset_peers);
+    raft_server->refresh_nodes(nodes_config, 0, reset_peers);
 
     // refresh_nodes with reset_peers should work
     reset_peers = true;
-    raft_state_machine->refresh_nodes(nodes_config, 0, reset_peers);
+    raft_server->refresh_nodes(nodes_config, 0, reset_peers);
 
     // Node should remain functional after membership changes
-    auto status = raft_state_machine->get_status();
+    auto status = raft_server->get_status();
     EXPECT_TRUE(status.contains("state"));
 
-    raft_state_machine->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
-TEST_F(RaftStateMachineTest, RefreshNodesWithoutStarting) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, RefreshNodesWithoutStarting) {
+    auto raft_server = createRaftServer();
 
     // Test node refresh operations
     std::string nodes_config = "127.0.0.1:8090:8091";
     std::atomic<bool> reset_peers{false};
 
     // This should not crash even without initialized node
-    raft_state_machine->refresh_nodes(nodes_config, 0, reset_peers);
+    raft_server->refresh_nodes(nodes_config, 0, reset_peers);
 }
 
-TEST_F(RaftStateMachineTest, RefreshCatchupStatus) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, RefreshCatchupStatus) {
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9024, &peering_endpoint);
@@ -661,27 +661,27 @@ TEST_F(RaftStateMachineTest, RefreshCatchupStatus) {
 
     createRaftServer(peering_endpoint);
 
-    int start_result = raft_state_machine->start(peering_endpoint, 9025, 1000,
-                                                128 * 1024, raft_dir,
-                                                "127.0.0.1:9024:9025", quit_abruptly);
+    int start_result = raft_server->start(peering_endpoint, 9025, 1000,
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9024:9025", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Test refresh methods (should not crash)
-    raft_state_machine->refresh_catchup_status(false);
-    raft_state_machine->refresh_catchup_status(true);
+    raft_server->refresh_catchup_status(false);
+    raft_server->refresh_catchup_status(true);
 
-    raft_state_machine->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
-TEST_F(RaftStateMachineTest, RefreshCatchupStatusWithoutStarting) {
-    auto raft_state_machine = createRaftStateMachine();
+TEST_F(RaftServerTest, RefreshCatchupStatusWithoutStarting) {
+    auto raft_server = createRaftServer();
 
     // Should not crash when calling refresh_catchup_status without starting
-    raft_state_machine->refresh_catchup_status(true);
-    raft_state_machine->refresh_catchup_status(false);
+    raft_server->refresh_catchup_status(true);
+    raft_server->refresh_catchup_status(false);
 
     // Should return false for readiness flags without starting
-    EXPECT_FALSE(raft_state_machine->is_read_caught_up());
-    EXPECT_FALSE(raft_state_machine->is_write_caught_up());
+    EXPECT_FALSE(raft_server->is_read_caught_up());
+    EXPECT_FALSE(raft_server->is_write_caught_up());
 }
