@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include "http_server.h"
+#include <butil/endpoint.h>
 
 extern HttpServer* server;
 
@@ -24,3 +25,5 @@ int init_root_logger(Config& config, const std::string& server_version);
 
 int run_server(const Config& config, const std::string& version,
                void (*master_server_routes)());
+
+butil::EndPoint get_internal_endpoint(const std::string& subnet_cidr, uint32_t peering_port);

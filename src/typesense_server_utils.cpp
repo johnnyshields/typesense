@@ -30,6 +30,7 @@
 #include "stemmer_manager.h"
 #include "natural_language_search_model_manager.h"
 #include "conversation_model.h"
+#include "raft_server_manager.h"
 
 #ifndef ASAN_BUILD
 #include "jemalloc.h"
@@ -355,117 +356,6 @@ butil::EndPoint get_internal_endpoint(const std::string& subnet_cidr, uint32_t p
     return loopback;
 }
 
-int start_raft_server(RaftServer& raft_server, Store& store,
-                      const std::string& state_dir, const std::string& path_to_nodes,
-                      const std::string& peering_address, uint32_t peering_port, const std::string& peering_subnet,
-                      uint32_t api_port, int snapshot_interval_seconds, int snapshot_max_byte_count_per_rpc,
-                      const std::atomic<bool>& reset_peers_on_error) {
-
-    if(path_to_nodes.empty()) {
-        LOG(INFO) << "Since no --nodes argument is provided, starting a single node Typesense cluster.";
-    }
-
-    const Option<std::string>& nodes_config_op = Config::fetch_nodes_config(path_to_nodes);
-
-    if(!nodes_config_op.ok()) {
-        LOG(ERROR) << nodes_config_op.error();
-        return -1;
-    }
-
-    butil::EndPoint peering_endpoint;
-    int ip_conv_status = 0;
-
-    if(!peering_address.empty()) {
-        // If IPv6 address and not already wrapped in [], wrap it
-        std::string normalized_addr = peering_address;
-        if(peering_address.find(':') != std::string::npos &&
-           peering_address.front() != '[' && peering_address.back() != ']') {
-            normalized_addr = "[" + peering_address + "]";
-        }
-
-        ip_conv_status = butil::str2endpoint(normalized_addr.c_str(), peering_port, &peering_endpoint);
-
-        if(ip_conv_status != 0) {
-            LOG(ERROR) << "Failed to parse peering address `" << normalized_addr << "`";
-            return -1;
-        }
-    } else {
-        peering_endpoint = get_internal_endpoint(peering_subnet, peering_port);
-    }
-
-    // start peering server
-    brpc::Server peering_server;
-
-    if (braft::add_service(&peering_server, peering_endpoint) != 0) {
-        LOG(ERROR) << "Failed to add peering service";
-        exit(-1);
-    }
-
-    if (peering_server.Start(peering_endpoint, nullptr) != 0) {
-        LOG(ERROR) << "Failed to start peering service";
-        exit(-1);
-    }
-
-    size_t election_timeout_ms = 5000;
-
-    if (raft_server.start(peering_endpoint, api_port, election_timeout_ms, snapshot_max_byte_count_per_rpc, state_dir,
-                          nodes_config_op.get(), quit_raft_service) != 0) {
-        LOG(ERROR) << "Failed to start peering state";
-        exit(-1);
-    }
-
-    LOG(INFO) << "Typesense peering service is running on " << peering_server.listen_address();
-    LOG(INFO) << "Snapshot interval configured as: " << snapshot_interval_seconds << "s";
-    LOG(INFO) << "Snapshot max byte count configured as: " << snapshot_max_byte_count_per_rpc;
-
-    // Wait until 'CTRL-C' is pressed. then Stop() and Join() the service
-    size_t raft_counter = 0;
-    while (!brpc::IsAskedToQuit() && !quit_raft_service.load()) {
-        if(raft_counter % 10 == 0) {
-            // reset peer configuration periodically to identify change in cluster membership
-            const Option<std::string> & refreshed_nodes_op = Config::fetch_nodes_config(path_to_nodes);
-            if(!refreshed_nodes_op.ok()) {
-                LOG(WARNING) << "Error while refreshing peer configuration: " << refreshed_nodes_op.error();
-            } else {
-                const std::string& nodes_config = raft::config::to_nodes_config(peering_endpoint, api_port,
-                                                                                refreshed_nodes_op.get());
-                if(nodes_config.empty()) {
-                    LOG(WARNING) << "No nodes resolved from peer configuration.";
-                } else {
-                    raft_server.refresh_nodes(nodes_config, raft_counter, reset_peers_on_error);
-                    if(raft_counter % 60 == 0) {
-                        raft_server.do_snapshot(nodes_config);
-                    }
-                }
-            }
-        }
-
-        if(raft_counter % 3 == 0) {
-            // update node catch up status periodically, take care of logging too verbosely
-            bool log_msg = (raft_counter % 9 == 0);
-            raft_server.refresh_catchup_status(log_msg);
-        }
-
-        raft_counter++;
-        sleep(1);
-    }
-
-    LOG(INFO) << "Typesense peering service is going to quit.";
-
-    // Stop application before server
-    raft_server.shutdown();
-
-    LOG(INFO) << "peering_server.stop()";
-    peering_server.Stop(0);
-
-    LOG(INFO) << "peering_server.join()";
-    peering_server.Join();
-
-    LOG(INFO) << "Typesense peering service has quit.";
-
-    return 0;
-}
-
 int run_server(const Config & config, const std::string & version, void (*master_server_routes)()) {
     LOG(INFO) << "Starting Typesense " << version << std::flush;
 #ifndef ASAN_BUILD
@@ -658,7 +548,7 @@ int run_server(const Config & config, const std::string & version, void (*master
             LOG(INFO) << "Conversation garbage collector thread started.";
             ConversationManager::get_instance().run();
         });
-          
+
         HouseKeeper::get_instance().init();
         std::thread housekeeping_thread([]() {
             HouseKeeper::get_instance().run();
@@ -666,15 +556,18 @@ int run_server(const Config & config, const std::string & version, void (*master
 
         RemoteEmbedder::init(&raft_server);
 
+        // Start raft server using RaftServerManager
+        RaftServerManager& raft_manager = RaftServerManager::get_instance();
         std::string path_to_nodes = config.get_nodes();
-        start_raft_server(raft_server, store, state_dir, path_to_nodes,
-                          config.get_peering_address(),
-                          config.get_peering_port(),
-                          config.get_peering_subnet(),
-                          config.get_api_port(),
-                          config.get_snapshot_interval_seconds(),
-                          config.get_snapshot_max_byte_count_per_rpc(),
-                          config.get_reset_peers_on_error());
+        raft_manager.start_server(raft_server, store, state_dir, path_to_nodes,
+                                  config.get_peering_address(),
+                                  config.get_peering_port(),
+                                  config.get_peering_subnet(),
+                                  config.get_api_port(),
+                                  config.get_snapshot_interval_seconds(),
+                                  config.get_snapshot_max_byte_count_per_rpc(),
+                                  config.get_reset_peers_on_error(),
+                                  quit_raft_service);
 
         LOG(INFO) << "Shutting down batch indexer...";
         batch_indexer->stop();
