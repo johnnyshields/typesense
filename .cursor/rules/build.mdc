@@ -132,8 +132,8 @@ fi
 cp ../bazel-bin/typesense-server ./binaries/$LOCAL_BINARY
 
 # Download official release binary for comparison
-# Check https://typesense.org/downloads for latest version on location (look for Linux > Binary (x64/arm64)
-# Check https://github.com/typesense/typesense/releases for released tag info.
+# Check https://typesense.org/downloads for latest version on location (look for Linux > Binary)
+# IF needed, https://github.com/typesense/typesense/releases for released tag info.
 echo "Downloading official v<X.Y> release..."
 curl -O https://dl.typesense.org/releases/<X.Y>/typesense-server-<X.Y>-linux-amd64.tar.gz
 tar -xzf typesense-server-<X.Y>-linux-amd64.tar.gz
@@ -178,7 +178,7 @@ pnpm test
 - Servers start on ports 8108, 7108, 9108 for multi-node testing
 - Wait for "Request Code was 201" before benchmark collection is ready
 
-## Release Distribution
+## Release Dist
 ```bash
 bazel build //:typesense-server --dist_dir ./dist
 ```

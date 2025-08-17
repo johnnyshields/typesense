@@ -8,7 +8,7 @@ alwaysApply: true
 
 ## Local files
 
-- ./DESIGN.md → core design philosophy and structure
+- ./DESIGN.md → core design philosophy and structure (read before implementing new features!)
 - ./TODO.md → planned features (~~ indicates completed/implemented)
 
 ## Web
