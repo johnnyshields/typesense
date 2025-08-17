@@ -122,3 +122,44 @@ TEST(Hostname2IPStrTest, PublicHostnames) {
             << "ipv4.test-ipv6.com did not resolve to IPv4: " << ipv4_result;
     }
 }
+
+// Test the new parse_node_configuration method (replaces resolve_node_hosts)
+TEST(RaftServerTest, ParseNodeConfiguration) {
+    // Test mixed hostname and IP configuration
+    std::string mixed_config = "node1.example.com:8107:8108,192.168.1.10:8107:8108,node2.internal:8107:8108";
+    NodeConfiguration config = ReplicationState::parse_node_configuration(mixed_config);
+    
+    EXPECT_EQ(2, config.hostname_nodes.size());
+    EXPECT_EQ(1, config.ip_nodes.size());
+    EXPECT_TRUE(config.has_hostnames());
+    EXPECT_TRUE(config.has_ips());
+    EXPECT_FALSE(config.empty());
+    EXPECT_EQ(3, config.total_nodes());
+}
+
+TEST(RaftServerTest, ParseNodeConfigurationIPv6) {
+    // Test IPv6 configuration
+    std::string ipv6_config = "[2001:db8::1]:8107:8108,[2001:db8::2]:8107:8108";
+    NodeConfiguration config = ReplicationState::parse_node_configuration(ipv6_config);
+    
+    EXPECT_EQ(0, config.hostname_nodes.size());
+    EXPECT_EQ(2, config.ip_nodes.size());
+    EXPECT_FALSE(config.has_hostnames());
+    EXPECT_TRUE(config.has_ips());
+}
+
+TEST(RaftServerTest, ExtractHostnameFromNode) {
+    // Test hostname extraction
+    EXPECT_EQ("node1.example.com", 
+              ReplicationState::extract_hostname_from_node("node1.example.com:8107:8108"));
+    EXPECT_EQ("internal.service", 
+              ReplicationState::extract_hostname_from_node("internal.service:9000:9001"));
+    
+    // Test IP addresses (should return empty)
+    EXPECT_EQ("", ReplicationState::extract_hostname_from_node("192.168.1.10:8107:8108"));
+    EXPECT_EQ("", ReplicationState::extract_hostname_from_node("[2001:db8::1]:8107:8108"));
+    
+    // Test malformed strings
+    EXPECT_EQ("", ReplicationState::extract_hostname_from_node("malformed"));
+    EXPECT_EQ("", ReplicationState::extract_hostname_from_node("too:many:colons:8107:8108"));
+}
