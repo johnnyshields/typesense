@@ -1,0 +1,21 @@
+---
+description: Resources and documentation
+globs:
+alwaysApply: true
+---
+
+# Resources
+
+## Local files
+
+- ./DESIGN.md → core design philosophy and structure
+- ./TODO.md → planned features (~~ indicates completed/implemented)
+
+## Web
+
+- Homepage: https://typesense.org/
+- Docs: https://typesense.org/docs/
+- Release downloads: https://typesense.org/downloads
+- Roadmap: https://github.com/orgs/typesense/projects/1
+- Github: https://github.com/typesense/typesense
+- Github releases: https://github.com/typesense/typesense/releases

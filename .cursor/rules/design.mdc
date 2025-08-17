@@ -1,9 +1,0 @@
----
-description: Design and features
-globs:
-alwaysApply: true
----
-
-# Design and Features
-- To understand core design philosophy and structure, read /DESIGN.md
-- To understand which features have and are planned to be implemented, read /TODO.md (~~ indicates completed/implemented)

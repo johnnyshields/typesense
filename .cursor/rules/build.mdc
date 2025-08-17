@@ -14,13 +14,6 @@ This project has 3 test sets:
 
 **Default test command**: Run unit tests, then API tests. Benchmarks are optional unless being thorough.
 
-https://typesense.org/
-https://github.com/typesense/typesense
-https://typesense.org/docs/
-https://github.com/orgs/typesense/projects/1
-https://typesense.org/downloads
-https://github.com/typesense/typesense/releases
-
 ## Unit Tests
 
 ### Unit Tests Setup & Build
