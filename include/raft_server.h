@@ -16,7 +16,7 @@
 #include "cached_resource_stat.h"
 
 class Store;
-class ReplicationState;
+class RaftServer;
 
 // Implements the callback for the state machine
 class ReplicationClosure : public braft::Closure {
@@ -67,7 +67,7 @@ public:
 // Closure that fires when requested
 class OnDemandSnapshotClosure : public braft::Closure {
 private:
-    ReplicationState* replication_state;
+    RaftServer* raft_server;
     const std::shared_ptr<http_req> req;
     const std::shared_ptr<http_res> res;
     const std::string ext_snapshot_path;
@@ -75,10 +75,10 @@ private:
 
 public:
 
-    OnDemandSnapshotClosure(ReplicationState *replication_state, const std::shared_ptr<http_req>& req,
+    OnDemandSnapshotClosure(RaftServer *raft_server, const std::shared_ptr<http_req>& req,
                             const std::shared_ptr<http_res>& res, const std::string& ext_snapshot_path,
                             const std::string& state_dir_path) :
-        replication_state(replication_state), req(req), res(res), ext_snapshot_path(ext_snapshot_path),
+        raft_server(raft_server), req(req), res(res), ext_snapshot_path(ext_snapshot_path),
         state_dir_path(state_dir_path) {}
 
     ~OnDemandSnapshotClosure() {}
@@ -88,11 +88,11 @@ public:
 
 class TimedSnapshotClosure : public braft::Closure {
 private:
-    ReplicationState* replication_state;
+    RaftServer* raft_server;
 
 public:
 
-    TimedSnapshotClosure(ReplicationState *replication_state) : replication_state(replication_state){}
+    TimedSnapshotClosure(RaftServer *raft_server) : raft_server(raft_server){}
 
     ~TimedSnapshotClosure() {}
 
@@ -100,7 +100,7 @@ public:
 };
 
 // Implements braft::StateMachine.
-class ReplicationState : public braft::StateMachine {
+class RaftServer : public braft::StateMachine {
 private:
     static constexpr const char* db_snapshot_name = "db_snapshot";
     static constexpr const char* analytics_db_snapshot_name = "analytics_db_snapshot";
@@ -156,10 +156,10 @@ public:
     static constexpr const char* meta_dir_name = "meta";
     static constexpr const char* snapshot_dir_name = "snapshot";
 
-    ReplicationState(HttpServer* server, BatchedIndexer* batched_indexer, Store* store, Store* analytics_store,
-                     ThreadPool* thread_pool, http_message_dispatcher* message_dispatcher,
-                     bool api_uses_ssl, const Config* config,
-                     size_t num_collections_parallel_load, size_t num_documents_parallel_load);
+    RaftServer(HttpServer* server, BatchedIndexer* batched_indexer, Store* store, Store* analytics_store,
+               ThreadPool* thread_pool, http_message_dispatcher* message_dispatcher,
+               bool api_uses_ssl, const Config* config,
+               size_t num_collections_parallel_load, size_t num_documents_parallel_load);
 
     // Starts this node
     int start(const butil::EndPoint & peering_endpoint, int api_port,
@@ -209,9 +209,6 @@ public:
     // for manual / external snapshots
     void do_snapshot(const std::string& snapshot_path, const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
 
-    static std::string to_nodes_config(const butil::EndPoint &peering_endpoint, const int api_port,
-                                       const std::string &nodes_config);
-
     void set_ext_snapshot_path(const std::string &snapshot_path);
 
     void set_snapshot_in_progress(const bool snapshot_in_progress);
@@ -235,18 +232,6 @@ public:
         cv.notify_all();
     }
 
-    /**
-     * Resolves a hostname to an IP string.
-     *
-     * @param hostname The hostname to resolve.
-     * @return A string representation of the resolved IP address.
-     *         For IPv6 addresses, the IP will be enclosed in square brackets.
-     *         Returns empty string if resolution fails or hostname is invalid.
-     */
-    static std::string hostname2ipstr(const std::string& hostname);
-
-    static std::string resolve_node_hosts(const std::string& nodes_config);
-
     int64_t get_num_queued_writes();
 
     bool is_leader();
@@ -255,9 +240,15 @@ public:
 
     std::string get_leader_url() const;
 
-    static Option<bool> handle_gzip(const std::shared_ptr<http_req>& request);
-
     void decr_pending_writes();
+
+    static std::string hostname2ipstr(const std::string& hostname);
+    static std::string resolve_node_hosts(const std::string& nodes_config);
+    static std::string to_nodes_config(const butil::EndPoint& peering_endpoint, const int api_port,
+                                       const std::string& nodes_config);
+    static std::string get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
+                                         const std::string& protocol);
+    static Option<bool> handle_gzip(const std::shared_ptr<http_req>& request);
 
 private:
 
@@ -267,7 +258,7 @@ private:
     void on_apply(braft::Iterator& iter);
 
     struct SnapshotArg {
-        ReplicationState* replication_state;
+        RaftServer* raft_server;
         braft::SnapshotWriter* writer;
         std::string state_dir_path;
         std::string db_snapshot_path;
@@ -316,7 +307,4 @@ private:
     void write_to_leader(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response);
 
     void do_dummy_write();
-
-    std::string get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
-                                  const std::string& protocol) const;
 };

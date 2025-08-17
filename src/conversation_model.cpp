@@ -1197,7 +1197,6 @@ Option<std::string> vLLMConversationModel::get_answer_stream(const std::string& 
     if(model_config.count("api_key") != 0) {
         headers["Authorization"] = "Bearer " + model_config["api_key"].get<std::string>();
     }
-    
 
     req->async_res_set_headers_callback = async_res_set_headers_callback;
     req->async_res_write_callback = async_res_write_callback;

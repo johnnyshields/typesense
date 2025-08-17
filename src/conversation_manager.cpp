@@ -95,7 +95,7 @@ Option<std::string> ConversationManager::add_conversation(const nlohmann::json& 
 
 Option<nlohmann::json> ConversationManager::get_conversation(const std::string& conversation_id, const nlohmann::json& model) {
     if(!model.contains("history_collection")) {
-        return Option<nlohmann::json>(400, "Model does not contain history_collection"); 
+        return Option<nlohmann::json>(400, "Model does not contain history_collection");
     }
 
     auto collection_op = get_history_collection(model);
@@ -236,7 +236,7 @@ Option<nlohmann::json> ConversationManager::delete_conversation(const std::strin
     return delete_conversation_unsafe(conversation_id, model_id);
 } 
 
-Option<bool> ConversationManager::init(ReplicationState* raft_server) {
+Option<bool> ConversationManager::init(RaftServer* raft_server) {
 
     if(raft_server == nullptr) {
         return Option<bool>(400, "Raft server is null");
@@ -271,7 +271,7 @@ void ConversationManager::clear_expired_conversations() {
         auto ttl = model["ttl"].get<uint64_t>();
         std::string filter_by_str = "timestamp:<" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count() - ttl + TTL_OFFSET) + "&&model_id:=" + model["id"].get<std::string>();
         if(raft_server) {
-            
+
             std::string res;
             std::map<std::string, std::string> res_headers;
             std::string url  = raft_server->get_leader_url() + "collections/" + history_collection + "/documents?filter_by=" + filter_by_str;
