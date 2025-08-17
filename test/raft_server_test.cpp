@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <string>
 #include "raft_server.h"
+#include "collection_manager.h"
 
 class ConfigImpl : public Config {
 public:
