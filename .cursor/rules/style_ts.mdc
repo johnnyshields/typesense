@@ -9,9 +9,11 @@ globs:
 
 # TypeScript Style Guide
 
-## Summary
+## How to Use
+Apply these guidelines to new code. For existing files, generally match the current file's style, but it's ok to gradually adopt these guidelines for larger edits without changing unrelated code.
 
-The Typesense TypeScript codebase follows modern ECMAScript standards with strict type safety and functional programming patterns. The architecture centers on Result types (`neverthrow`) for comprehensive error handling, Zod schemas for runtime validation at system boundaries, and type-safe environment configuration. The codebase emphasizes immutability, extensive use of async/await patterns, proper resource management with lifecycle hooks, and leverages TypeScript's advanced type system features throughout.
+## Summary
+The Typesense TypeScript codebase follows modern ECMAScript standards with strict type safety and functional programming patterns. The architecture uses a mix of error handling approaches: Result types (`neverthrow`) in testing and benchmarking code, traditional `try/catch` in API tests, and `Option<T>` patterns inherited from the C++ codebase. Zod schemas are used for runtime validation in benchmark tooling. The codebase emphasizes immutability, extensive use of async/await patterns, proper resource management with lifecycle hooks, and leverages TypeScript's advanced type system features throughout.
 
 ## File Organization
 
@@ -20,7 +22,7 @@ The Typesense TypeScript codebase follows modern ECMAScript standards with stric
 - `.mts` - ES modules with TypeScript
 - `.js`/`.mjs` - Only when TypeScript not applicable
 - **Directory naming**: `kebab-case` (e.g., `typesense-process/`)
-- **File naming**: `kebab-case` (e.g., `error-handling.ts`)
+- **File naming**: Single-word files use simple names (e.g., `error.ts`, `logger.ts`), multi-word files use `kebab-case` (e.g., `package-info.ts`, `typesense-process.ts`)
 
 ### Import Structure (Order Matters!)
 ```typescript
@@ -108,7 +110,7 @@ const serverConfig = {
 ## Critical Patterns
 
 ### Result Pattern (neverthrow)
-**Used extensively for error handling**
+**Used in testing and benchmark directories, not universally across codebase**
 ```typescript
 import { Result, ok, err, ResultAsync } from "neverthrow";
 
@@ -138,7 +140,7 @@ const result = await loadConfig("./config.json")
 ```
 
 ### Zod Runtime Validation
-**Always validate external data at boundaries**
+**Used primarily in benchmark tooling for configuration validation**
 ```typescript
 import { z } from "zod";
 
@@ -156,7 +158,7 @@ function validateConfig(data: unknown): ServerConfig {
   return ServerConfigSchema.parse(data);  // Throws on invalid
 }
 
-// Safe parsing
+// Safe parsing (preferred in benchmark tooling)
 const result = ServerConfigSchema.safeParse(data);
 if (result.success) {
   // result.data is typed
@@ -166,7 +168,7 @@ if (result.success) {
 ```
 
 ### Environment Configuration
-**Type-safe env vars with validation**
+**Type-safe env vars with validation (used in benchmark tooling)**
 ```typescript
 import { createEnv } from "@t3-oss/env-core";
 
@@ -257,9 +259,11 @@ type KeysOf<T> = keyof T;
 
 ## Async/Resource Management
 
-### Async Patterns
+### Error Handling Patterns
+The codebase uses different error handling approaches depending on the module:
+
+**Traditional try/catch (common in API tests):**
 ```typescript
-// Always async/await, never .then()
 async function processMultipleItems(items: Item[]): Promise<ProcessedItem[]> {
   try {
     // Concurrent operations with Promise.all
@@ -269,6 +273,20 @@ async function processMultipleItems(items: Item[]): Promise<ProcessedItem[]> {
     return results;
   } catch (error) {
     throw new ProcessingError(`Failed: ${error.message}`);
+  }
+}
+```
+
+**neverthrow Result pattern (used in tests/benchmark directories):**
+```typescript
+import { ResultAsync, ok, err } from "neverthrow";
+
+async function loadConfig(path: string): Promise<Result<Config, ConfigError>> {
+  try {
+    const content = await readFile(path);
+    return ok(parseConfig(content));
+  } catch (error) {
+    return err(new ConfigError(`Failed: ${error.message}`));
   }
 }
 ```

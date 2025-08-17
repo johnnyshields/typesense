@@ -10,33 +10,37 @@ globs:
 
 # C++ Style Guide
 
-## Summary
+## How to Use
+Apply these guidelines to new code. For existing files, generally match the current file's style, but it's ok to gradually adopt these guidelines for larger edits without changing unrelated code.
 
+## Summary
 The Typesense C++ codebase is a modern, high-performance search engine implementation that heavily utilizes templates, smart pointers, and contemporary C++ features. The architecture emphasizes thread-safe singleton patterns with `get_instance()` methods, comprehensive error handling through `Option<T>` wrappers, RAII guards for automatic resource management, and extensive use of `std::shared_mutex` for thread safety. Memory management combines smart pointers for ownership with raw pointers for non-owning references, while maintaining strict const-correctness throughout.
 
 ## File Organization
 
 ### Headers
+- Headers use `.h` extension
+- Implementation uses `.cpp` extension
 ```cpp
 #pragma once  // Always use (not include guards)
 
-// Include order is strict:
-// 1. System/standard headers with <>
+// Ideal include order (existing code may break convention)
+// 1. Own header first (in .cpp files) - important pattern!
+#include "collection.h"
+
+// 2. System/standard headers with <>
 #include <string>
 #include <vector>
 #include <chrono>
 
-// 2. Third-party headers with <>
+// 3. Third-party headers with <>
 #include <brpc/controller.h>
 #include <nlohmann/json.hpp>
 
-// 3. Local project headers with ""
-#include "collection.h"
+// 4. Other local project headers with ""
 #include "string_utils.h"
+#include "logger.h"
 ```
-
-- Headers use `.h` extension
-- Implementation uses `.cpp` extension
 
 ## Naming Conventions
 
