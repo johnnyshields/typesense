@@ -12,8 +12,6 @@
 #include <ifaddrs.h>
 #include "string_utils.h"
 
-extern std::atomic<bool> quit_raft_service;
-
 int RaftServerManager::start_server(RaftServer& server, Store& store,
                                    const std::string& state_dir, const std::string& nodes_path,
                                    const std::string& peering_address, uint32_t peering_port,
@@ -53,7 +51,7 @@ int RaftServerManager::start_server(RaftServer& server, Store& store,
     // Initialize raft server
     int raft_result = initialize_raft_server(server, peering_endpoint, port,
                                            max_byte_count_per_rpc, state_dir,
-                                           nodes_config_op.get());
+                                           nodes_config_op.get(), quit_service);
     if (raft_result != 0) {
         peering_server.Stop(0);
         peering_server.Join();
@@ -151,11 +149,12 @@ int RaftServerManager::initialize_raft_server(RaftServer& server,
                                              uint32_t port,
                                              int max_byte_count_per_rpc,
                                              const std::string& state_dir,
-                                             const std::string& nodes_config) {
+                                             const std::string& nodes_config,
+                                             const std::atomic<bool>& quit_service) {
     size_t election_timeout_ms = 5000;
 
     if (server.start(endpoint, port, election_timeout_ms, max_byte_count_per_rpc, state_dir,
-                     nodes_config, quit_raft_service) != 0) {
+                     nodes_config, quit_service) != 0) {
         LOG(ERROR) << "Failed to start peering state";
         return -1;
     }

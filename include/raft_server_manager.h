@@ -74,7 +74,8 @@ private:
                                uint32_t api_port,
                                int snapshot_max_byte_count_per_rpc,
                                const std::string& state_dir,
-                               const std::string& nodes_config);
+                               const std::string& nodes_config,
+                               const std::atomic<bool>& quit_service);
 
     void refresh_peer_configuration(size_t raft_counter);
     void refresh_catchup_status(size_t raft_counter);
