@@ -3,7 +3,7 @@
 #include <sstream>
 #include <vector>
 #include <memory>
-#include "raft_http.h"
+#include "raft_server.h"
 #include "http_data.h"
 
 TEST(RaftHttpTest, HandleGzipDecompression) {
@@ -18,7 +18,7 @@ TEST(RaftHttpTest, HandleGzipDecompression) {
     req->body.resize(length);
     infile.read(&req->body[0], length);
 
-    auto res = raft::http::handle_gzip(req);
+    auto res = RaftServer::handle_gzip(req);
     if (!res.error().empty()) {
         LOG(ERROR) << res.error();
         FAIL();

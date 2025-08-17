@@ -427,8 +427,8 @@ int start_raft_server(RaftServer& raft_server, Store& store,
             if(!refreshed_nodes_op.ok()) {
                 LOG(WARNING) << "Error while refreshing peer configuration: " << refreshed_nodes_op.error();
             } else {
-                const std::string& nodes_config = raft::config::to_nodes_config(peering_endpoint, api_port,
-                                                                                refreshed_nodes_op.get());
+                const std::string& nodes_config = RaftServer::to_nodes_config(peering_endpoint, api_port,
+                                                                              refreshed_nodes_op.get());
                 if(nodes_config.empty()) {
                     LOG(WARNING) << "No nodes resolved from peer configuration.";
                 } else {

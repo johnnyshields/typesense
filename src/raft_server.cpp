@@ -1,7 +1,11 @@
 #include "store.h"
 #include "raft_server.h"
-#include "raft_http.h"
-#include "raft_config.h"
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <cstring>
+#include <vector>
+#include <zlib.h>
 #include <butil/files/file_enumerator.h>
 #include <thread>
 #include <algorithm>
@@ -47,7 +51,7 @@ int RaftServer::start(const butil::EndPoint & peering_endpoint, const int api_po
     size_t max_tries = 3;
 
     while(true) {
-        std::string actual_nodes_config = raft::config::to_nodes_config(peering_endpoint, api_port, nodes);
+        std::string actual_nodes_config = RaftServer::to_nodes_config(peering_endpoint, api_port, nodes);
 
         if(actual_nodes_config.empty()) {
             LOG(WARNING) << "No nodes resolved from peer configuration.";
@@ -204,7 +208,7 @@ void RaftServer::write(const std::shared_ptr<http_req>& request, const std::shar
     //check if it's first gzip chunk or is gzip stream initialized
     if(((request->body.size() > 2) &&
         (31 == (int)request->body[0] && -117 == (int)request->body[1])) || request->zstream_initialized) {
-        auto res = raft::http::handle_gzip(request);
+        auto res = RaftServer::handle_gzip(request);
 
         if(!res.ok()) {
             response->set_422(res.error());
@@ -277,7 +281,7 @@ void RaftServer::write_to_leader(const std::shared_ptr<http_req>& request, const
     auto raw_req = request->_req;
     const std::string& path = std::string(raw_req->path.base, raw_req->path.len);
     const std::string& scheme = std::string(raw_req->scheme->name.base, raw_req->scheme->name.len);
-    const std::string url = raft::config::get_node_url_path(leader_addr, path, scheme);
+    const std::string url = RaftServer::get_node_url_path(leader_addr, path, scheme);
 
     thread_pool->enqueue([request, response, server, path, url, this]() {
         pending_writes++;
@@ -694,7 +698,7 @@ void RaftServer::refresh_catchup_status(bool log_msg) {
     lock.unlock();
 
     const std::string protocol = api_uses_ssl ? "https" : "http";
-    std::string url = raft::config::get_node_url_path(leader_addr, "/status", protocol);
+    std::string url = RaftServer::get_node_url_path(leader_addr, "/status", protocol);
 
     std::string api_res;
     std::map<std::string, std::string> res_headers;
@@ -803,7 +807,7 @@ void RaftServer::do_dummy_write() {
     lock.unlock();
 
     const std::string protocol = api_uses_ssl ? "https" : "http";
-    std::string url = raft::config::get_node_url_path(leader_addr, "/health", protocol);
+    std::string url = RaftServer::get_node_url_path(leader_addr, "/health", protocol);
 
     std::string api_res;
     std::map<std::string, std::string> res_headers;
@@ -834,9 +838,9 @@ bool RaftServer::reset_peers() {
             return false;
         }
 
-        const std::string& nodes_config = raft::config::to_nodes_config(peering_endpoint,
-                                                                            Config::get_instance().get_api_port(),
-                                                                            refreshed_nodes_op.get());
+        const std::string& nodes_config = RaftServer::to_nodes_config(peering_endpoint,
+                                                                      Config::get_instance().get_api_port(),
+                                                                      refreshed_nodes_op.get());
 
         if(nodes_config.empty()) {
             LOG(WARNING) << "No nodes resolved from peer configuration.";
@@ -976,7 +980,7 @@ void RaftServer::do_snapshot(const std::string& nodes) {
             }
 
             const std::string protocol = api_uses_ssl ? "https" : "http";
-            std::string url = raft::config::get_node_url_path(peer, "/health", protocol);
+            std::string url = RaftServer::get_node_url_path(peer, "/health", protocol);
             std::string api_res;
             std::map<std::string, std::string> res_headers;
             long status_code = HttpClient::get_response(url, api_res, res_headers, {}, 5*1000, true);
@@ -1020,7 +1024,7 @@ std::string RaftServer::get_leader_url() const {
     lock.unlock();
 
     const std::string protocol = api_uses_ssl ? "https" : "http";
-    return raft::config::get_node_url_path(leader_addr, "/", protocol);
+    return RaftServer::get_node_url_path(leader_addr, "/", protocol);
 }
 
 void RaftServer::decr_pending_writes() {
@@ -1098,4 +1102,177 @@ void OnDemandSnapshotClosure::Run() {
 
     // wait for response to be sent
     res->wait();
+}
+
+std::string RaftServer::hostname2ipstr(const std::string& hostname) {
+    if(hostname.size() > 64) {
+        LOG(ERROR) << "Host name is too long (must be < 64 characters): " << hostname;
+        return "";
+    }
+
+    // Check if this is already an IPv6 address by looking for []
+    if(hostname.find('[') == 0) {
+        return hostname;
+    }
+
+    struct addrinfo hints, *result;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;     // Allow both IPv4 and IPv6
+    hints.ai_socktype = SOCK_STREAM; // TCP
+
+    int status = getaddrinfo(hostname.c_str(), nullptr, &hints, &result);
+    if (status != 0) {
+        LOG(ERROR) << "Unable to resolve host: " << hostname << ", error: " << gai_strerror(status);
+        return hostname; // Return original hostname on error
+    }
+
+    char ip_str[INET6_ADDRSTRLEN];
+    std::string resolved_ip;
+
+    // Get the first resolved address
+    if (result->ai_family == AF_INET) {
+        // IPv4
+        struct sockaddr_in *addr = (struct sockaddr_in *)result->ai_addr;
+        inet_ntop(AF_INET, &(addr->sin_addr), ip_str, INET_ADDRSTRLEN);
+        resolved_ip = ip_str;
+    } else if (result->ai_family == AF_INET6) {
+        // IPv6
+        struct sockaddr_in6 *addr = (struct sockaddr_in6 *)result->ai_addr;
+        inet_ntop(AF_INET6, &(addr->sin6_addr), ip_str, INET6_ADDRSTRLEN);
+        resolved_ip = std::string("[") + ip_str + "]";
+    }
+
+    freeaddrinfo(result);
+
+    if(resolved_ip.empty()) {
+        return hostname; // Return original hostname if resolution didn't produce a valid IP
+    }
+
+    return resolved_ip;
+}
+
+std::string RaftServer::resolve_node_hosts(const std::string& nodes_config) {
+    std::vector<std::string> final_nodes_vec;
+    std::vector<std::string> node_strings;
+    StringUtils::split(nodes_config, node_strings, ",");
+
+    for(const auto& node_str: node_strings) {
+        // Check if this is already an IPv6 address node by looking for []
+        if(node_str.find('[') == 0) {
+            final_nodes_vec.push_back(node_str);
+            continue;
+        }
+
+        // could be an IP or a hostname that must be resolved
+        std::vector<std::string> node_parts;
+        StringUtils::split(node_str, node_parts, ":");
+
+        if(node_parts.size() != 3) {
+            final_nodes_vec.push_back(node_str);
+            continue;
+        }
+
+        std::string resolved_ip = hostname2ipstr(node_parts[0]);
+        if(resolved_ip.empty()) {
+            LOG(ERROR) << "Unable to resolve host: " << node_parts[0];
+            continue;
+        }
+
+        final_nodes_vec.push_back(resolved_ip + ":" + node_parts[1] + ":" + node_parts[2]);
+    }
+
+    if(final_nodes_vec.empty()) {
+        return "";
+    }
+
+    std::string final_nodes_config = StringUtils::join(final_nodes_vec, ",");
+    return final_nodes_config;
+}
+
+std::string RaftServer::to_nodes_config(const butil::EndPoint& peering_endpoint, const int api_port,
+                                        const std::string& nodes_config) {
+    if(nodes_config.empty()) {
+        // endpoint2str gives us "<ip>:<peering_port>", we just need to add ":<api_port>"
+        return std::string(butil::endpoint2str(peering_endpoint).c_str()) + ":" + std::to_string(api_port);
+    } else {
+        return resolve_node_hosts(nodes_config);
+    }
+}
+
+std::string RaftServer::get_node_url_path(const braft::PeerId& peer_id,
+                                          const std::string& path,
+                                          const std::string& protocol) {
+    const std::string endpoint_str = butil::endpoint2str(peer_id.addr).c_str();
+    const size_t last_colon = endpoint_str.rfind(':');
+    if (last_colon == std::string::npos) {
+        LOG(ERROR) << "Invalid endpoint format: " << endpoint_str;
+        return "";
+    }
+
+    // For IPv6, the IP part may contain colons and be wrapped in []
+    const std::string ip_part = endpoint_str.substr(0, last_colon);
+
+    std::string url = protocol + "://";
+    url += ip_part;  // IP part (possibly with [] for IPv6)
+    url += ":";
+    url += std::to_string(peer_id.idx);
+
+    // Add path ensuring there's exactly one / between URL parts
+    if(!path.empty()) {
+        if(path[0] == '/') {
+            url += path;
+        } else {
+            url += "/" + path;
+        }
+    }
+
+    return url;
+}
+
+Option<bool> RaftServer::handle_gzip(const std::shared_ptr<http_req>& request) {
+    if (!request->zstream_initialized) {
+        request->zs.zalloc = Z_NULL;
+        request->zs.zfree = Z_NULL;
+        request->zs.opaque = Z_NULL;
+        request->zs.avail_in = 0;
+        request->zs.next_in = Z_NULL;
+
+        if (inflateInit2(&request->zs, 16 + MAX_WBITS) != Z_OK) {
+            return Option<bool>(400, "inflateInit failed while decompressing");
+        }
+
+        request->zstream_initialized = true;
+    }
+
+    std::string outbuffer;
+    outbuffer.resize(10 * request->body.size());
+
+    request->zs.next_in = (Bytef *) request->body.c_str();
+    request->zs.avail_in = request->body.size();
+    std::size_t size_uncompressed = 0;
+    int ret = 0;
+    do {
+        request->zs.avail_out = static_cast<unsigned int>(outbuffer.size());
+        request->zs.next_out = reinterpret_cast<Bytef *>(&outbuffer[0] + size_uncompressed);
+        ret = inflate(&request->zs, Z_FINISH);
+        if (ret != Z_STREAM_END && ret != Z_OK && ret != Z_BUF_ERROR) {
+            std::string error_msg = request->zs.msg;
+            inflateEnd(&request->zs);
+            return Option<bool>(400, error_msg);
+        }
+
+        size_uncompressed += (outbuffer.size() - request->zs.avail_out);
+    } while (request->zs.avail_out == 0);
+
+    if (ret == Z_STREAM_END) {
+        request->zstream_initialized = false;
+        inflateEnd(&request->zs);
+    }
+
+    outbuffer.resize(size_uncompressed);
+
+    request->body = outbuffer;
+    request->chunk_len = outbuffer.size();
+
+    return Option<bool>(true);
 }
