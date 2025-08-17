@@ -6,7 +6,6 @@
 #include <brpc/server.h>
 #include <braft/raft.h>
 #include <raft_server.h>
-#include <raft_config.h>
 #include <fstream>
 #include <execinfo.h>
 #include <http_client.h>
