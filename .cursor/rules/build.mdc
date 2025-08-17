@@ -92,7 +92,6 @@ cd api_tests && TYPESENSE_BINARY_PATH="<bazel cquery path above>" TYPESENSE_DATA
 - **Do not attempt Node.js** as alternative for bun
 
 ## Benchmarks
-
 - Read /benchmark/README.md first.
 - Only use pnpm for benchmarks (NOT bun or npm)
 
@@ -143,23 +142,23 @@ rm typesense-server-$REMOTE_VERSION-linux-amd64.tar.gz typesense-server.md5.txt
 ```
 
 ### Run Benchmarks
-
 ```bash
 # Run benchmark comparing local vs official release
 # Use the binaries and LOCAL_COMMIT/LOCAL_BINARY/REMOTE_VERSION from setup step above
 
 # Run benchmark with proper working-directory, binaries, and commit hashes
-# ts-cli will download data automatically
-ts-cli benchmark \
-  --working-directory ./data \
+#  automatically downloads 1M song dataset (344MB MusicBrainz data) for realistic performance testing
+cd benchmark # if not in ./benchmark dir
+node dist/index.js benchmark \
+  --working-directory "$(pwd)/data" \
   --binaries "$(pwd)/binaries/$LOCAL_BINARY" "$(pwd)/binaries/typesense-server-v$REMOTE_VERSION$" \
   --commitHashes $LOCAL_COMMIT v$REMOTE_VERSION \
   --duration 30s --batch-size 1000 --verbose
 ```
 
-### Run Integration Tests
+### Integration Tests
 ```bash
-# Run the benchmark integration test suite
+# Run the benchmark integration test suite (not needed to run, unless user is actually modifying/developing the .benchmark/src/files)
 export TYPESENSE_BINARY="../bazel-out/k8-fastbuild/bin/typesense-server"
 export TYPESENSE_WORKING_DIRECTORY="/tmp/typesense-benchmark"
 pnpm test
@@ -167,8 +166,10 @@ pnpm test
 
 ### Benchmarks Troubleshooting
 - You must be using pnpm (not bun or npm)
+- Use `node dist/index.js benchmark` (`ts-cli` and `typesense-benchmark` `commands are equivalent)
 - Benchmark CLI requires at least 2 binaries for comparison
 - `--commitHashes` arg is required; use version numbers (v29.0) for official releases
+- Use absolute paths for `--working-directory` to avoid path resolution issues
 - **DO NOT modify git repo** - detect local state without checking out branches
 - Binaries organized in `/benchmark/binaries/` with naming: `typesense-server-<commit or tag>[-<local modificaton hash>]
 - Local modifications get binary hash suffix (e.g., `c817bf8-47f4`) - industry standard
