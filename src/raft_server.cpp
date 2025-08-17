@@ -476,7 +476,7 @@ void RaftServer::write_to_leader(const std::shared_ptr<http_req>& request, const
 }
 
 std::string RaftServer::get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
-                                                const std::string& protocol) const {
+                                          const std::string& protocol) {
     const std::string endpoint_str = butil::endpoint2str(peer_id.addr).c_str();
     const size_t last_colon = endpoint_str.rfind(':');
     if (last_colon == std::string::npos) {

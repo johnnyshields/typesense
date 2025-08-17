@@ -318,5 +318,5 @@ private:
     void do_dummy_write();
 
     static std::string get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
-                                         const std::string& protocol) const;
+                                         const std::string& protocol);
 };
