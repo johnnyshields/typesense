@@ -14,6 +14,13 @@ This project has 3 test sets:
 
 **Default test command**: Run unit tests, then API tests. Benchmarks are optional unless being thorough.
 
+https://typesense.org/
+https://github.com/typesense/typesense
+https://typesense.org/docs/
+https://github.com/orgs/typesense/projects/1
+https://typesense.org/downloads
+https://github.com/typesense/typesense/releases
+
 ## Unit Tests
 
 ### Unit Tests Setup & Build
@@ -109,23 +116,55 @@ bazel build //:typesense-server
 cd benchmark
 pnpm install
 pnpm build
+
+# Create directories for binaries and test data
+mkdir -p ./binaries
+mkdir -p ./data
+
+# Get current git state (without modifying repo, do not perform git actions)
+CURRENT_COMMIT=$(git rev-parse --short=7 HEAD)
+LOCAL_MODS=$(git status --porcelain | wc -l)
+
+# Build and save current local binary with proper naming
+if [ $LOCAL_MODS -gt 0 ]; then
+    # Local modifications detected - add binary hash suffix (industry standard)
+    BINARY_HASH=$(md5sum ../bazel-bin/typesense-server | cut -c1-4)
+    LOCAL_BINARY_NAME="typesense-server-$CURRENT_COMMIT-$BINARY_HASH"
+    echo "Local modifications detected, using: $LOCAL_BINARY_NAME"
+else
+    LOCAL_BINARY_NAME="typesense-server-$CURRENT_COMMIT"
+fi
+
+cp ../bazel-bin/typesense-server ./binaries/$LOCAL_BINARY_NAME
+
+# Download official release binary for comparison
+# Check https://typesense.org/downloads for latest version on location (look for Linux > Binary (x64/arm64)
+# Check https://github.com/typesense/typesense/releases for released tag info.
+echo "Downloading official v<X.Y> release..."
+curl -O https://dl.typesense.org/releases/<X.Y>/typesense-server-<X.Y>-linux-amd64.tar.gz
+tar -xzf typesense-server-<X.Y>-linux-amd64.tar.gz
+mv typesense-server ./binaries/typesense-server-v<X.Y>
+rm typesense-server-<X.Y>-linux-amd64.tar.gz typesense-server.md5.txt
+
+# Set up required test data (benchmark expects data.json)
+echo '{"documents": [{"id": "1", "name": "test document", "description": "sample data for benchmarking"}]}' > ./data/data.json
 ```
 
 ### Run Benchmarks
 
-TODO--this needs to benchmark vs. master branch
-
 ```bash
-# First build core server (see Unit Tests section)
-# Then find binary path:
-bazel cquery --output=files //:typesense-server
+# Run benchmark comparing local vs official release
+# Use the binaries created in setup step above
 
-# HACK: reate duplicate binaries for comparison (benchmark requires at least 2 binaries)
-# cp ../bazel-out/k8-fastbuild/bin/typesense-server ../typesense-server-v1
-# cp ../bazel-out/k8-fastbuild/bin/typesense-server ../typesense-server-v2
+# Get the local binary name (will have commit hash and possibly binary hash)
+LOCAL_BINARY=$(ls ./binaries/typesense-server-*
+LOCAL_NAME=$(basename $LOCAL_BINARY | sed 's/typesense-server-//')
 
-# Run benchmark with CLI (replace commit hashes as needed)
-ts-cli benchmark --binaries ../typesense-server-v1 ../typesense-server-v2 --commitHashes abc123 def456 --duration 30s --batch-size 100 --verbose
+# Run benchmark with proper commit hashes
+ts-cli benchmark \
+  --binaries $LOCAL_BINARY ./binaries/typesense-server-v<X.Y> \
+  --commitHashes $LOCAL_NAME v<X.Y> \
+  --duration 30s --batch-size 100 --verbose
 ```
 
 ### Run Integration Tests
@@ -139,12 +178,17 @@ pnpm test
 ### Benchmarks Troubleshooting
 - You must be using pnpm (not bun or npm)
 - Benchmark CLI requires at least 2 binaries for comparison
-- `--commitHashes` arg is required but can be dummy (if you provide `--binaries`)
-- Benchmark creates working directory at `/tmp/typesense-benchmark`
+- `--commitHashes` arg is required; use version numbers (v29.0) for official releases
+- **DO NOT modify git repo** - detect local state without checking out branches
+- Binaries organized in `/benchmark/binaries/` with naming: `typesense-server-<commit or tag>[-<local modificaton hash>]
+- Local modifications get binary hash suffix (e.g., `c817bf8-47f4`) - industry standard
+- Official releases use version as commit hash (e.g., `v29.0`)
+- Test data must be in `/benchmark/data/data.json` (required by benchmark system)
+- Download official binaries from: `https://dl.typesense.org/releases/<X.Y>/typesense-server-<X.Y>-linux-amd64.tar.gz`. Check https://typesense.org/downloads and https://github.com/typesense/typesense/releases for latest released tag.
 - Servers start on ports 8108, 7108, 9108 for multi-node testing
 - Wait for "Request Code was 201" before benchmark collection is ready
 
 ## Release Distribution
 ```bash
-./ci_build_v2.sh
+bazel build //:typesense-server --dist_dir ./dist
 ```
