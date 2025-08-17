@@ -242,8 +242,13 @@ public:
 
     void decr_pending_writes();
 
+    static std::string hostname2ipstr(const std::string& hostname);
+    static std::string resolve_node_hosts(const std::string& nodes_config);
     static std::string to_nodes_config(const butil::EndPoint& peering_endpoint, const int api_port,
                                        const std::string& nodes_config);
+    static std::string get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
+                                         const std::string& protocol);
+    static Option<bool> handle_gzip(const std::shared_ptr<http_req>& request);
 
 private:
 
@@ -302,10 +307,4 @@ private:
     void write_to_leader(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response);
 
     void do_dummy_write();
-
-    static std::string hostname2ipstr(const std::string& hostname);
-    static std::string resolve_node_hosts(const std::string& nodes_config);
-    static std::string get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
-                                         const std::string& protocol);
-    static Option<bool> handle_gzip(const std::shared_ptr<http_req>& request);
 };
