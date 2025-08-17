@@ -28,7 +28,7 @@ protected:
         exit_manager = std::make_unique<butil::AtExitManager>();
 
         // Create test directory
-        test_dir = "/tmp/typesense_test/replication_state";
+        test_dir = "/tmp/typesense_test/raft_server";
         std::filesystem::remove_all(test_dir);
         std::filesystem::create_directories(test_dir);
 
@@ -79,8 +79,8 @@ protected:
         std::filesystem::remove_all(test_dir);
     }
 
-    std::unique_ptr<ReplicationState> createReplicationState() {
-        return std::make_unique<ReplicationState>(
+    std::unique_ptr<RaftServer> createRaftServer() {
+        return std::make_unique<RaftServer>(
             http_server, batched_indexer, store, analytics_store,
             thread_pool, message_dispatcher, false, config, 4, 1000
         );
@@ -101,7 +101,7 @@ protected:
     }
 
     struct MultiNodeSetup {
-        std::vector<std::unique_ptr<ReplicationState>> rpc_servers;
+        std::vector<std::unique_ptr<RaftServer>> rpc_servers;
         std::vector<butil::EndPoint> peering_endpoints;
         std::vector<int> api_ports;
         std::vector<std::string> raft_dirs;
@@ -140,7 +140,7 @@ protected:
                 EXPECT_EQ(result, 0);
 
                 node_configs.push_back("127.0.0.1:" + std::to_string(peer_port) + ":" + std::to_string(api_ports[i]));
-                raft_dirs[i] = "/tmp/typesense_test/replication_state/multinode_" + std::to_string(i);
+                raft_dirs[i] = "/tmp/typesense_test/raft_server/multinode_" + std::to_string(i);
 
                 // Create directories
                 std::filesystem::create_directories(raft_dirs[i] + "/log");
@@ -167,9 +167,9 @@ protected:
             test_instance->createRpcServer(setup.peering_endpoints[i]);
         }
 
-        // Create ReplicationState instances
+        // Create RaftServer instances
         for (int i = 0; i < num_nodes; i++) {
-            setup.rpc_servers[i] = test_instance->createReplicationState();
+            setup.rpc_servers[i] = test_instance->createRaftServer();
         }
 
         return setup;
@@ -177,17 +177,17 @@ protected:
 };
 
 TEST_F(RaftServerTest, Constructor) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
-    EXPECT_NE(replication_state, nullptr);
-    EXPECT_EQ(replication_state->get_store(), store);
-    EXPECT_EQ(replication_state->get_message_dispatcher(), message_dispatcher);
+    EXPECT_NE(raft_server, nullptr);
+    EXPECT_EQ(raft_server->get_store(), store);
+    EXPECT_EQ(raft_server->get_message_dispatcher(), message_dispatcher);
 }
 
 // ==================== SINGLE-NODE TESTS ====================
 
 TEST_F(RaftServerTest, StartSingleNode) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     // Set up raft startup parameters
     butil::EndPoint peering_endpoint;
@@ -209,8 +209,8 @@ TEST_F(RaftServerTest, StartSingleNode) {
     // Set up RPC server for this endpoint
     createRpcServer(peering_endpoint);
 
-    // ReplicationState should start successfully
-    int start_result = replication_state->start(peering_endpoint, api_port, election_timeout_ms,
+    // RaftServer should start successfully
+    int start_result = raft_server->start(peering_endpoint, api_port, election_timeout_ms,
                                                  snapshot_max_byte_count_per_rpc, raft_dir,
                                                  nodes_config, quit_abruptly);
     EXPECT_EQ(start_result, 0);
@@ -219,23 +219,23 @@ TEST_F(RaftServerTest, StartSingleNode) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     // For single-node clusters, manually refresh catchup status (simulates periodic refresh in main server loop)
-    replication_state->refresh_catchup_status(false);
+    raft_server->refresh_catchup_status(false);
 
     // State machine should be alive and ready
-    EXPECT_TRUE(replication_state->is_alive());
+    EXPECT_TRUE(raft_server->is_alive());
 
     // Should have proper raft state
-    auto status = replication_state->get_status();
+    auto status = raft_server->get_status();
     EXPECT_TRUE(status.contains("state"));
     std::string state = status["state"];
     EXPECT_TRUE(state == "LEADER" || state == "FOLLOWER" || state == "CANDIDATE");
 
-    replication_state->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
 TEST_F(RaftServerTest, IsAliveSingleNode) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9002, &peering_endpoint);
@@ -249,7 +249,7 @@ TEST_F(RaftServerTest, IsAliveSingleNode) {
 
     createRpcServer(peering_endpoint);
 
-    int start_result = replication_state->start(peering_endpoint, 9003, 1000,
+    int start_result = raft_server->start(peering_endpoint, 9003, 1000,
                                                  128 * 1024, raft_dir,
                                                  "127.0.0.1:9002:9003", quit_abruptly);
     EXPECT_EQ(start_result, 0);
@@ -258,24 +258,24 @@ TEST_F(RaftServerTest, IsAliveSingleNode) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     // For single-node clusters, manually refresh catchup status (simulates periodic refresh in main server loop)
-    replication_state->refresh_catchup_status(false);
+    raft_server->refresh_catchup_status(false);
 
     // Should be alive after starting
-    EXPECT_TRUE(replication_state->is_alive());
+    EXPECT_TRUE(raft_server->is_alive());
 
-    replication_state->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
 TEST_F(RaftServerTest, IsAliveWithoutStarting) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     // Initially not alive
-    EXPECT_FALSE(replication_state->is_alive());
+    EXPECT_FALSE(raft_server->is_alive());
 }
 
 TEST_F(RaftServerTest, IsLeader) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9004, &peering_endpoint);
@@ -289,7 +289,7 @@ TEST_F(RaftServerTest, IsLeader) {
 
     createRpcServer(peering_endpoint);
 
-    int start_result = replication_state->start(peering_endpoint, 9005, 800,
+    int start_result = raft_server->start(peering_endpoint, 9005, 800,
                                                  128 * 1024, raft_dir,
                                                  "127.0.0.1:9004:9005", quit_abruptly);
     EXPECT_EQ(start_result, 0);
@@ -298,24 +298,24 @@ TEST_F(RaftServerTest, IsLeader) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2500));
 
     // Single node should elect itself as leader
-    EXPECT_TRUE(replication_state->is_leader());
+    EXPECT_TRUE(raft_server->is_leader());
 
-    auto status = replication_state->get_status();
+    auto status = raft_server->get_status();
     EXPECT_EQ(status["state"], "LEADER");
 
-    replication_state->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
 TEST_F(RaftServerTest, IsLeaderWithoutStarting) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     // Initially not leader
-    EXPECT_FALSE(replication_state->is_leader());
+    EXPECT_FALSE(raft_server->is_leader());
 }
 
 TEST_F(RaftServerTest, ReadWriteCaughtUpSingleNode) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9006, &peering_endpoint);
@@ -329,7 +329,7 @@ TEST_F(RaftServerTest, ReadWriteCaughtUpSingleNode) {
 
     createRpcServer(peering_endpoint);
 
-    int start_result = replication_state->start(peering_endpoint, 9007, 1000,
+    int start_result = raft_server->start(peering_endpoint, 9007, 1000,
                                                  128 * 1024, raft_dir,
                                                  "127.0.0.1:9006:9007", quit_abruptly);
     EXPECT_EQ(start_result, 0);
@@ -338,26 +338,26 @@ TEST_F(RaftServerTest, ReadWriteCaughtUpSingleNode) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // For single-node clusters, manually refresh catchup status since leader doesn't trigger it
-    replication_state->refresh_catchup_status(false);
+    raft_server->refresh_catchup_status(false);
 
     // Should be ready for operations
-    EXPECT_TRUE(replication_state->is_read_caught_up());
-    EXPECT_TRUE(replication_state->is_write_caught_up());
+    EXPECT_TRUE(raft_server->is_read_caught_up());
+    EXPECT_TRUE(raft_server->is_write_caught_up());
 
-    replication_state->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
 TEST_F(RaftServerTest, ReadWriteCaughtUpWithoutStarting) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     // Initially not ready
-    EXPECT_FALSE(replication_state->is_read_caught_up());
-    EXPECT_FALSE(replication_state->is_write_caught_up());
+    EXPECT_FALSE(raft_server->is_read_caught_up());
+    EXPECT_FALSE(raft_server->is_write_caught_up());
 }
 
 TEST_F(RaftServerTest, GetStatus) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9008, &peering_endpoint);
@@ -371,7 +371,7 @@ TEST_F(RaftServerTest, GetStatus) {
 
     createRpcServer(peering_endpoint);
 
-    int start_result = replication_state->start(peering_endpoint, 9009, 1000,
+    int start_result = raft_server->start(peering_endpoint, 9009, 1000,
                                                  128 * 1024, raft_dir,
                                                  "127.0.0.1:9008:9009", quit_abruptly);
     EXPECT_EQ(start_result, 0);
@@ -380,18 +380,18 @@ TEST_F(RaftServerTest, GetStatus) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));
 
     // Should be able to get status
-    auto status = replication_state->get_status();
+    auto status = raft_server->get_status();
     EXPECT_TRUE(status.contains("state"));
 
-    replication_state->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
 TEST_F(RaftServerTest, GetStatusWithoutStarting) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     // Get status JSON
-    auto status = replication_state->get_status();
+    auto status = raft_server->get_status();
 
     // Should contain expected keys
     EXPECT_TRUE(status.contains("state"));
@@ -404,7 +404,7 @@ TEST_F(RaftServerTest, GetStatusWithoutStarting) {
 }
 
 TEST_F(RaftServerTest, GetLeaderUrl) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9010, &peering_endpoint);
@@ -418,7 +418,7 @@ TEST_F(RaftServerTest, GetLeaderUrl) {
 
     createRpcServer(peering_endpoint);
 
-    int start_result = replication_state->start(peering_endpoint, 9011, 1000,
+    int start_result = raft_server->start(peering_endpoint, 9011, 1000,
                                                  128 * 1024, raft_dir,
                                                  "127.0.0.1:9010:9011", quit_abruptly);
     EXPECT_EQ(start_result, 0);
@@ -427,23 +427,23 @@ TEST_F(RaftServerTest, GetLeaderUrl) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // Should have leader URL
-    auto leader_url = replication_state->get_leader_url();
+    auto leader_url = raft_server->get_leader_url();
     EXPECT_FALSE(leader_url.empty());
 
-    replication_state->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
 TEST_F(RaftServerTest, GetLeaderUrlWithoutStarting) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     // No leader initially
-    auto leader_url = replication_state->get_leader_url();
+    auto leader_url = raft_server->get_leader_url();
     EXPECT_TRUE(leader_url.empty());
 }
 
 TEST_F(RaftServerTest, HasLeaderTerm) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9012, &peering_endpoint);
@@ -457,7 +457,7 @@ TEST_F(RaftServerTest, HasLeaderTerm) {
 
     createRpcServer(peering_endpoint);
 
-    int start_result = replication_state->start(peering_endpoint, 9013, 1000,
+    int start_result = raft_server->start(peering_endpoint, 9013, 1000,
                                                  128 * 1024, raft_dir,
                                                  "127.0.0.1:9012:9013", quit_abruptly);
     EXPECT_EQ(start_result, 0);
@@ -466,22 +466,22 @@ TEST_F(RaftServerTest, HasLeaderTerm) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // Should have leader term
-    EXPECT_TRUE(replication_state->has_leader_term());
+    EXPECT_TRUE(raft_server->has_leader_term());
 
-    replication_state->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
 TEST_F(RaftServerTest, HasLeaderTermWithoutStarting) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     // No leader initially
-    bool has_leader = replication_state->has_leader_term();
+    bool has_leader = raft_server->has_leader_term();
     EXPECT_FALSE(has_leader);
 }
 
 TEST_F(RaftServerTest, WriteSingleNode) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9014, &peering_endpoint);
@@ -495,7 +495,7 @@ TEST_F(RaftServerTest, WriteSingleNode) {
 
     createRpcServer(peering_endpoint);
 
-    int start_result = replication_state->start(peering_endpoint, 9015, 1000,
+    int start_result = raft_server->start(peering_endpoint, 9015, 1000,
                                                  128 * 1024, raft_dir,
                                                  "127.0.0.1:9014:9015", quit_abruptly);
     EXPECT_EQ(start_result, 0);
@@ -504,14 +504,14 @@ TEST_F(RaftServerTest, WriteSingleNode) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // Node should become leader
-    EXPECT_TRUE(replication_state->is_leader());
+    EXPECT_TRUE(raft_server->is_leader());
 
     // For single-node clusters, manually refresh catchup status since leader doesn't trigger it
-    replication_state->refresh_catchup_status(false);
+    raft_server->refresh_catchup_status(false);
 
     // Should be ready for operations
-    EXPECT_TRUE(replication_state->is_read_caught_up());
-    EXPECT_TRUE(replication_state->is_write_caught_up());
+    EXPECT_TRUE(raft_server->is_read_caught_up());
+    EXPECT_TRUE(raft_server->is_write_caught_up());
 
     // Test write request processing
     auto request = std::make_shared<http_req>();
@@ -526,35 +526,35 @@ TEST_F(RaftServerTest, WriteSingleNode) {
     response->final = false;
 
     // Write request should be processed
-    replication_state->write(request, response);
+    raft_server->write(request, response);
 
     // Give time for async processing
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    replication_state->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
 TEST_F(RaftServerTest, InitDb) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     // Database initialization should succeed
-    int init_result = replication_state->init_db();
+    int init_result = raft_server->init_db();
     EXPECT_EQ(init_result, 0);
 
     // State machine should remain functional after init_db
-    EXPECT_NE(replication_state, nullptr);
+    EXPECT_NE(raft_server, nullptr);
 
     // Should be able to get status after initialization
-    auto status = replication_state->get_status();
+    auto status = raft_server->get_status();
     EXPECT_TRUE(status.contains("state"));
 
     // Other operations should work correctly
-    EXPECT_FALSE(replication_state->is_alive());
+    EXPECT_FALSE(raft_server->is_alive());
 }
 
 TEST_F(RaftServerTest, TriggerVote) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9016, &peering_endpoint);
@@ -568,7 +568,7 @@ TEST_F(RaftServerTest, TriggerVote) {
 
     createRpcServer(peering_endpoint);
 
-    int start_result = replication_state->start(peering_endpoint, 9017, 800,
+    int start_result = raft_server->start(peering_endpoint, 9017, 800,
                                                  128 * 1024, raft_dir,
                                                  "127.0.0.1:9016:9017", quit_abruptly);
     EXPECT_EQ(start_result, 0);
@@ -577,23 +577,23 @@ TEST_F(RaftServerTest, TriggerVote) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2500));
 
     // Should be able to trigger vote (no-op for leader)
-    replication_state->trigger_vote();
+    raft_server->trigger_vote();
     // Result depends on node state
 
-    replication_state->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
 TEST_F(RaftServerTest, TriggerVoteWithoutStarting) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     // Should fail without initialized node
-    bool vote_result = replication_state->trigger_vote();
+    bool vote_result = raft_server->trigger_vote();
     EXPECT_FALSE(vote_result);
 }
 
 TEST_F(RaftServerTest, ResetPeers) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9018, &peering_endpoint);
@@ -607,7 +607,7 @@ TEST_F(RaftServerTest, ResetPeers) {
 
     createRpcServer(peering_endpoint);
 
-    int start_result = replication_state->start(peering_endpoint, 9019, 1000,
+    int start_result = raft_server->start(peering_endpoint, 9019, 1000,
                                                  128 * 1024, raft_dir,
                                                  "127.0.0.1:9018:9019", quit_abruptly);
     EXPECT_EQ(start_result, 0);
@@ -616,23 +616,23 @@ TEST_F(RaftServerTest, ResetPeers) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // reset_peers should work
-    replication_state->reset_peers();
+    raft_server->reset_peers();
     // Result depends on implementation
 
-    replication_state->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
 TEST_F(RaftServerTest, ResetPeersWithoutStarting) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     // Should fail without initialized node
-    bool reset_result = replication_state->reset_peers();
+    bool reset_result = raft_server->reset_peers();
     EXPECT_FALSE(reset_result);
 }
 
 TEST_F(RaftServerTest, RefreshNodes) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9020, &peering_endpoint);
@@ -646,7 +646,7 @@ TEST_F(RaftServerTest, RefreshNodes) {
 
     createRpcServer(peering_endpoint);
 
-    int start_result = replication_state->start(peering_endpoint, 9021, 1000,
+    int start_result = raft_server->start(peering_endpoint, 9021, 1000,
                                                  128 * 1024, raft_dir,
                                                  "127.0.0.1:9020:9021", quit_abruptly);
     EXPECT_EQ(start_result, 0);
@@ -659,33 +659,33 @@ TEST_F(RaftServerTest, RefreshNodes) {
     std::atomic<bool> reset_peers{false};
 
     // refresh_nodes should work
-    replication_state->refresh_nodes(nodes_config, 0, reset_peers);
+    raft_server->refresh_nodes(nodes_config, 0, reset_peers);
 
     // refresh_nodes with reset_peers should work
     reset_peers = true;
-    replication_state->refresh_nodes(nodes_config, 0, reset_peers);
+    raft_server->refresh_nodes(nodes_config, 0, reset_peers);
 
     // Node should remain functional after membership changes
-    auto status = replication_state->get_status();
+    auto status = raft_server->get_status();
     EXPECT_TRUE(status.contains("state"));
 
-    replication_state->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
 TEST_F(RaftServerTest, RefreshNodesWithoutStarting) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     // Test node refresh operations
     std::string nodes_config = "127.0.0.1:8090:8091";
     std::atomic<bool> reset_peers{false};
 
     // This should not crash even without initialized node
-    replication_state->refresh_nodes(nodes_config, 0, reset_peers);
+    raft_server->refresh_nodes(nodes_config, 0, reset_peers);
 }
 
 TEST_F(RaftServerTest, RefreshCatchupStatus) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     butil::EndPoint peering_endpoint;
     int result = butil::str2endpoint("127.0.0.1", 9024, &peering_endpoint);
@@ -699,29 +699,29 @@ TEST_F(RaftServerTest, RefreshCatchupStatus) {
 
     createRpcServer(peering_endpoint);
 
-    int start_result = replication_state->start(peering_endpoint, 9025, 1000,
+    int start_result = raft_server->start(peering_endpoint, 9025, 1000,
                                                  128 * 1024, raft_dir,
                                                  "127.0.0.1:9024:9025", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Test refresh methods (should not crash)
-    replication_state->refresh_catchup_status(false);
-    replication_state->refresh_catchup_status(true);
+    raft_server->refresh_catchup_status(false);
+    raft_server->refresh_catchup_status(true);
 
-    replication_state->shutdown();
+    raft_server->shutdown();
     std::filesystem::remove_all(raft_dir);
 }
 
 TEST_F(RaftServerTest, RefreshCatchupStatusWithoutStarting) {
-    auto replication_state = createReplicationState();
+    auto raft_server = createRaftServer();
 
     // Should not crash when calling refresh_catchup_status without starting
-    replication_state->refresh_catchup_status(true);
-    replication_state->refresh_catchup_status(false);
+    raft_server->refresh_catchup_status(true);
+    raft_server->refresh_catchup_status(false);
 
     // Should return false for readiness flags without starting
-    EXPECT_FALSE(replication_state->is_read_caught_up());
-    EXPECT_FALSE(replication_state->is_write_caught_up());
+    EXPECT_FALSE(raft_server->is_read_caught_up());
+    EXPECT_FALSE(raft_server->is_write_caught_up());
 }
 
 // ==================== MULTI-NODE TESTS ====================
@@ -1139,17 +1139,17 @@ namespace {
 
 TEST(ResolveNodeHostsTest, ConfigWithHostNames) {
     ASSERT_EQ("127.0.0.1:8107:8108,127.0.0.1:7107:7108,127.0.0.1:6107:6108",
-              ReplicationState::resolve_node_hosts("127.0.0.1:8107:8108,127.0.0.1:7107:7108,127.0.0.1:6107:6108"));
+              RaftServer::resolve_node_hosts("127.0.0.1:8107:8108,127.0.0.1:7107:7108,127.0.0.1:6107:6108"));
 
     // Test localhost resolution - should accept either IPv4 or IPv6
-    std::string localhost_result1 = ReplicationState::resolve_node_hosts("localhost:8107:8108,localhost:7107:7108,localhost:6107:6108");
+    std::string localhost_result1 = RaftServer::resolve_node_hosts("localhost:8107:8108,localhost:7107:7108,localhost:6107:6108");
     ASSERT_TRUE(matches_either_ip_version(
         localhost_result1,
         "127.0.0.1:8107:8108,127.0.0.1:7107:7108,127.0.0.1:6107:6108",
         "[::1]:8107:8108,[::1]:7107:7108,[::1]:6107:6108"
     )) << "Result was: " << localhost_result1;
 
-    std::string localhost_result2 = ReplicationState::resolve_node_hosts("localhost:8107:8108localhost:7107:7108,localhost:6107:6108");
+    std::string localhost_result2 = RaftServer::resolve_node_hosts("localhost:8107:8108localhost:7107:7108,localhost:6107:6108");
     ASSERT_TRUE(matches_either_ip_version(
         localhost_result2,
         "localhost:8107:8108localhost:7107:7108,127.0.0.1:6107:6108",
@@ -1158,33 +1158,33 @@ TEST(ResolveNodeHostsTest, ConfigWithHostNames) {
 
     // hostname must be less than 64 chars
     ASSERT_EQ("",
-              ReplicationState::resolve_node_hosts("typesense-node-2.typesense-service.typesense-"
-                                                   "namespace.svc.cluster.local:6107:6108"));
+              RaftServer::resolve_node_hosts("typesense-node-2.typesense-service.typesense-"
+                                             "namespace.svc.cluster.local:6107:6108"));
 }
 
 TEST(ResolveNodeHostsTest, ConfigWithIPv6) {
     // Basic IPv6 addresses
     ASSERT_EQ("[2001:db8::1]:8107:8108,[2001:db8::2]:7107:7108",
-              ReplicationState::resolve_node_hosts("[2001:db8::1]:8107:8108,[2001:db8::2]:7107:7108"));
+              RaftServer::resolve_node_hosts("[2001:db8::1]:8107:8108,[2001:db8::2]:7107:7108"));
 
     // IPv6 with IPv4 mixed
     ASSERT_EQ("[2001:db8::1]:8107:8108,127.0.0.1:7107:7108",
-              ReplicationState::resolve_node_hosts("[2001:db8::1]:8107:8108,127.0.0.1:7107:7108"));
+              RaftServer::resolve_node_hosts("[2001:db8::1]:8107:8108,127.0.0.1:7107:7108"));
 
     // IPv6 localhost
     ASSERT_EQ("[::1]:8107:8108",
-              ReplicationState::resolve_node_hosts("[::1]:8107:8108"));
+              RaftServer::resolve_node_hosts("[::1]:8107:8108"));
 
     // Malformed IPv6 inputs should be passed through unchanged
     ASSERT_EQ("[2001:db8::1:8107:8108",  // Missing closing bracket
-              ReplicationState::resolve_node_hosts("[2001:db8::1:8107:8108"));
+              RaftServer::resolve_node_hosts("[2001:db8::1:8107:8108"));
 
     // IPv6 with zone index
     ASSERT_EQ("[fe80::1%eth0]:8107:8108",
-              ReplicationState::resolve_node_hosts("[fe80::1%eth0]:8107:8108"));
+              RaftServer::resolve_node_hosts("[fe80::1%eth0]:8107:8108"));
 
     // Test with real IPv6 hostname resolution - need to skip if resolution fails
-    std::string ipv6_result = ReplicationState::resolve_node_hosts("ipv6.test-ipv6.com:8107:8108");
+    std::string ipv6_result = RaftServer::resolve_node_hosts("ipv6.test-ipv6.com:8107:8108");
     if (!ipv6_result.empty()) {
         EXPECT_TRUE(ipv6_result.find('[') == 0);  // Should start with '[' for IPv6
         EXPECT_TRUE(ipv6_result.find("]:8107:8108") != std::string::npos);
@@ -1193,16 +1193,16 @@ TEST(ResolveNodeHostsTest, ConfigWithIPv6) {
 
 TEST(Hostname2IPStrTest, IPAddresses) {
     // Test IPv4 addresses - should return unchanged
-    ASSERT_EQ("127.0.0.1", ReplicationState::hostname2ipstr("127.0.0.1"));
-    ASSERT_EQ("192.168.1.1", ReplicationState::hostname2ipstr("192.168.1.1"));
+    ASSERT_EQ("127.0.0.1", RaftServer::hostname2ipstr("127.0.0.1"));
+    ASSERT_EQ("192.168.1.1", RaftServer::hostname2ipstr("192.168.1.1"));
 
     // Test IPv6 addresses - should return unchanged if already in brackets
-    ASSERT_EQ("[::1]", ReplicationState::hostname2ipstr("[::1]"));
-    ASSERT_EQ("[2001:db8::1]", ReplicationState::hostname2ipstr("[2001:db8::1]"));
+    ASSERT_EQ("[::1]", RaftServer::hostname2ipstr("[::1]"));
+    ASSERT_EQ("[2001:db8::1]", RaftServer::hostname2ipstr("[2001:db8::1]"));
 }
 
 TEST(Hostname2IPStrTest, Localhost) {
-    std::string result = ReplicationState::hostname2ipstr("localhost");
+    std::string result = RaftServer::hostname2ipstr("localhost");
 
     // Should resolve to either 127.0.0.1 or [::1]
     ASSERT_TRUE(result == "127.0.0.1" || result == "[::1]")
@@ -1212,23 +1212,23 @@ TEST(Hostname2IPStrTest, Localhost) {
 TEST(Hostname2IPStrTest, InvalidHostnames) {
     // Test hostname that's too long (>64 chars)
     std::string long_hostname(65, 'a');
-    ASSERT_EQ("", ReplicationState::hostname2ipstr(long_hostname));
+    ASSERT_EQ("", RaftServer::hostname2ipstr(long_hostname));
 
     // Test non-existent hostname - implementation returns original hostname
     ASSERT_EQ("non.existent.hostname.local",
-              ReplicationState::hostname2ipstr("non.existent.hostname.local"));
+              RaftServer::hostname2ipstr("non.existent.hostname.local"));
 }
 
 TEST(Hostname2IPStrTest, PublicHostnames) {
     // Test IPv6-only hostname resolution
-    std::string ipv6_result = ReplicationState::hostname2ipstr("ipv6.test-ipv6.com");
+    std::string ipv6_result = RaftServer::hostname2ipstr("ipv6.test-ipv6.com");
     if (!ipv6_result.empty() && ipv6_result != "ipv6.test-ipv6.com") {
         EXPECT_TRUE(is_ipv6_with_brackets(ipv6_result))
             << "ipv6.test-ipv6.com did not resolve to IPv6: " << ipv6_result;
     }
 
     // Test IPv4-only hostname resolution
-    std::string ipv4_result = ReplicationState::hostname2ipstr("ipv4.test-ipv6.com");
+    std::string ipv4_result = RaftServer::hostname2ipstr("ipv4.test-ipv6.com");
     if (!ipv4_result.empty() && ipv4_result != "ipv4.test-ipv6.com") {
         EXPECT_TRUE(is_ipv4(ipv4_result))
             << "ipv4.test-ipv6.com did not resolve to IPv4: " << ipv4_result;
@@ -1247,7 +1247,7 @@ TEST(HandleGzipTest, HandleGzipDecompression) {
     req->body.resize(length);
     infile.read(&req->body[0], length);
 
-    auto res = ReplicationState::handle_gzip(req);
+    auto res = RaftServer::handle_gzip(req);
     if (!res.error().empty()) {
         LOG(ERROR) << res.error();
         FAIL();
