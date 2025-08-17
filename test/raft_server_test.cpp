@@ -1156,7 +1156,7 @@ namespace {
     }
 }
 
-TEST(RaftConfigTest, ResolveNodesConfigWithHostNames) {
+TEST(RaftServerTest, ResolveNodesConfigWithHostNames) {
     ASSERT_EQ("127.0.0.1:8107:8108,127.0.0.1:7107:7108,127.0.0.1:6107:6108",
               RaftServer::resolve_node_hosts("127.0.0.1:8107:8108,127.0.0.1:7107:7108,127.0.0.1:6107:6108"));
 
@@ -1181,7 +1181,7 @@ TEST(RaftConfigTest, ResolveNodesConfigWithHostNames) {
                                              "namespace.svc.cluster.local:6107:6108"));
 }
 
-TEST(RaftConfigTest, ResolveNodesConfigWithIPv6) {
+TEST(RaftServerTest, ResolveNodesConfigWithIPv6) {
     // Basic IPv6 addresses
     ASSERT_EQ("[2001:db8::1]:8107:8108,[2001:db8::2]:7107:7108",
               RaftServer::resolve_node_hosts("[2001:db8::1]:8107:8108,[2001:db8::2]:7107:7108"));
@@ -1210,7 +1210,7 @@ TEST(RaftConfigTest, ResolveNodesConfigWithIPv6) {
     }
 }
 
-TEST(RaftConfigTest, Hostname2IPStrIPAddresses) {
+TEST(RaftServerTest, Hostname2IPStrIPAddresses) {
     // Test IPv4 addresses - should return unchanged
     ASSERT_EQ("127.0.0.1", RaftServer::hostname2ipstr("127.0.0.1"));
     ASSERT_EQ("192.168.1.1", RaftServer::hostname2ipstr("192.168.1.1"));
@@ -1220,7 +1220,7 @@ TEST(RaftConfigTest, Hostname2IPStrIPAddresses) {
     ASSERT_EQ("[2001:db8::1]", RaftServer::hostname2ipstr("[2001:db8::1]"));
 }
 
-TEST(RaftConfigTest, Hostname2IPStrLocalhost) {
+TEST(RaftServerTest, Hostname2IPStrLocalhost) {
     std::string result = RaftServer::hostname2ipstr("localhost");
 
     // Should resolve to either 127.0.0.1 or [::1]
@@ -1228,7 +1228,7 @@ TEST(RaftConfigTest, Hostname2IPStrLocalhost) {
         << "localhost resolved to: " << result;
 }
 
-TEST(RaftConfigTest, Hostname2IPStrInvalidHostnames) {
+TEST(RaftServerTest, Hostname2IPStrInvalidHostnames) {
     // Test hostname that's too long (>64 chars)
     std::string long_hostname(65, 'a');
     ASSERT_EQ("", RaftServer::hostname2ipstr(long_hostname));
@@ -1238,7 +1238,7 @@ TEST(RaftConfigTest, Hostname2IPStrInvalidHostnames) {
               RaftServer::hostname2ipstr("non.existent.hostname.local"));
 }
 
-TEST(RaftConfigTest, Hostname2IPStrPublicHostnames) {
+TEST(RaftServerTest, Hostname2IPStrPublicHostnames) {
     // Test IPv6-only hostname resolution
     std::string ipv6_result = RaftServer::hostname2ipstr("ipv6.test-ipv6.com");
     if (!ipv6_result.empty() && ipv6_result != "ipv6.test-ipv6.com") {
@@ -1254,7 +1254,7 @@ TEST(RaftConfigTest, Hostname2IPStrPublicHostnames) {
     }
 }
 
-TEST(RaftHttpTest, HandleGzipDecompression) {
+TEST(RaftServerTest, HandleGzipDecompression) {
     auto req = std::make_shared<http_req>();
     std::ifstream infile(std::string(ROOT_DIR)+"test/resources/hnstories.jsonl.gz");
     std::stringstream outbuffer;
