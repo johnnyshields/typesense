@@ -1,6 +1,5 @@
 #include "raft_server_manager.h"
 #include "raft_server.h"
-#include "raft_config.h"
 #include "tsconfig.h"
 #include "logger.h"
 #include "store.h"
@@ -173,8 +172,8 @@ void RaftServerManager::refresh_peer_configuration(size_t raft_counter) {
         return;
     }
 
-    const std::string& nodes_config = raft::config::to_nodes_config(peering_endpoint, api_port,
-                                                                    refreshed_nodes_op.get());
+    const std::string& nodes_config = RaftServer::to_nodes_config(peering_endpoint, api_port,
+                                                                  refreshed_nodes_op.get());
     if (nodes_config.empty()) {
         LOG(WARNING) << "No nodes resolved from peer configuration.";
         return;
