@@ -120,8 +120,8 @@ protected:
         std::vector<butil::EndPoint> peering_endpoints;
         std::vector<int> api_ports;
         std::vector<std::string> raft_dirs;
+        std::vector<std::atomic<bool>> quit_flags;
         std::string nodes_config;
-        std::vector<std::unique_ptr<std::atomic<bool>>> quit_flags;
 
         // Make explicitly movable and non-copyable
         MultiNodeSetup(const MultiNodeSetup&) = delete;
@@ -129,27 +129,23 @@ protected:
         MultiNodeSetup(MultiNodeSetup&&) = default;
         MultiNodeSetup& operator=(MultiNodeSetup&&) = default;
 
-        MultiNodeSetup(int num_nodes = 3) {
-            raft_servers.reserve(num_nodes);
-            peering_endpoints.reserve(num_nodes);
-            api_ports.reserve(num_nodes);
-            raft_dirs.reserve(num_nodes);
-            quit_flags.reserve(num_nodes);
+        explicit MultiNodeSetup(int num_nodes = 3)
+            : raft_servers(num_nodes),
+              peering_endpoints(num_nodes),
+              api_ports(num_nodes),
+              raft_dirs(num_nodes),
+              quit_flags(num_nodes) {
 
-            // Initialize vectors with actual elements
-            for (int i = 0; i < num_nodes; i++) {
-                raft_servers.push_back(nullptr);  // Will be filled later
-                peering_endpoints.emplace_back();
-                api_ports.push_back(0);
-                raft_dirs.emplace_back();
-                quit_flags.push_back(std::make_unique<std::atomic<bool>>(false));
+            // Initialize quit flags to false
+            for (auto& flag : quit_flags) {
+                flag.store(false);
             }
 
             // Build nodes config string: "IP:PEER_PORT:API_PORT,..."
             std::vector<std::string> node_configs;
             for (int i = 0; i < num_nodes; i++) {
-                api_ports[i] = 9200 + i * 2;  // 9200, 9202, 9204
-                int peer_port = 9201 + i * 2;  // 9201, 9203, 9205
+                api_ports[i] = 9201 + i * 2;  // 9201, 9203, 9205
+                int peer_port = 9200 + i * 2;  // 9200, 9202, 9204
 
                 int result = butil::str2endpoint("127.0.0.1", peer_port, &peering_endpoints[i]);
                 EXPECT_EQ(result, 0);
@@ -207,9 +203,6 @@ TEST_F(RaftServerTest, StartSingleNode) {
     int result = butil::str2endpoint("127.0.0.1", 9000, &peering_endpoint);
     EXPECT_EQ(result, 0);
 
-    int api_port = 9001;
-    int election_timeout_ms = 1000;
-    int snapshot_max_byte_count_per_rpc = 128 * 1024;
     std::string raft_dir = test_dir + "/raft_startup";
     std::string nodes_config = "127.0.0.1:9000:9001";
     std::atomic<bool> quit_abruptly{false};
@@ -223,9 +216,9 @@ TEST_F(RaftServerTest, StartSingleNode) {
     createRpcServer(peering_endpoint);
 
     // RaftServer should start successfully
-    int start_result = raft_server->start(peering_endpoint, api_port, election_timeout_ms,
-                                                 snapshot_max_byte_count_per_rpc, raft_dir,
-                                                 nodes_config, quit_abruptly);
+    int start_result = raft_server->start(peering_endpoint, 9001, 1000,
+                                          128 * 1024, raft_dir,
+                                          nodes_config, quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Allow brief time for node to complete initialization
@@ -263,8 +256,8 @@ TEST_F(RaftServerTest, IsAliveSingleNode) {
     createRpcServer(peering_endpoint);
 
     int start_result = raft_server->start(peering_endpoint, 9003, 1000,
-                                                 128 * 1024, raft_dir,
-                                                 "127.0.0.1:9002:9003", quit_abruptly);
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9002:9003", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Allow brief time for node to complete initialization
@@ -303,8 +296,8 @@ TEST_F(RaftServerTest, IsLeader) {
     createRpcServer(peering_endpoint);
 
     int start_result = raft_server->start(peering_endpoint, 9005, 800,
-                                                 128 * 1024, raft_dir,
-                                                 "127.0.0.1:9004:9005", quit_abruptly);
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9004:9005", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for leader election to complete
@@ -343,8 +336,8 @@ TEST_F(RaftServerTest, ReadWriteCaughtUpSingleNode) {
     createRpcServer(peering_endpoint);
 
     int start_result = raft_server->start(peering_endpoint, 9007, 1000,
-                                                 128 * 1024, raft_dir,
-                                                 "127.0.0.1:9006:9007", quit_abruptly);
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9006:9007", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for leader election
@@ -385,8 +378,8 @@ TEST_F(RaftServerTest, GetStatus) {
     createRpcServer(peering_endpoint);
 
     int start_result = raft_server->start(peering_endpoint, 9009, 1000,
-                                                 128 * 1024, raft_dir,
-                                                 "127.0.0.1:9008:9009", quit_abruptly);
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9008:9009", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for startup to complete
@@ -432,8 +425,8 @@ TEST_F(RaftServerTest, GetLeaderUrl) {
     createRpcServer(peering_endpoint);
 
     int start_result = raft_server->start(peering_endpoint, 9011, 1000,
-                                                 128 * 1024, raft_dir,
-                                                 "127.0.0.1:9010:9011", quit_abruptly);
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9010:9011", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for leader election
@@ -471,8 +464,8 @@ TEST_F(RaftServerTest, HasLeaderTerm) {
     createRpcServer(peering_endpoint);
 
     int start_result = raft_server->start(peering_endpoint, 9013, 1000,
-                                                 128 * 1024, raft_dir,
-                                                 "127.0.0.1:9012:9013", quit_abruptly);
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9012:9013", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for leader election
@@ -509,8 +502,8 @@ TEST_F(RaftServerTest, WriteSingleNode) {
     createRpcServer(peering_endpoint);
 
     int start_result = raft_server->start(peering_endpoint, 9015, 1000,
-                                                 128 * 1024, raft_dir,
-                                                 "127.0.0.1:9014:9015", quit_abruptly);
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9014:9015", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for leader election
@@ -582,8 +575,8 @@ TEST_F(RaftServerTest, TriggerVote) {
     createRpcServer(peering_endpoint);
 
     int start_result = raft_server->start(peering_endpoint, 9017, 800,
-                                                 128 * 1024, raft_dir,
-                                                 "127.0.0.1:9016:9017", quit_abruptly);
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9016:9017", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for leader election
@@ -621,8 +614,8 @@ TEST_F(RaftServerTest, ResetPeers) {
     createRpcServer(peering_endpoint);
 
     int start_result = raft_server->start(peering_endpoint, 9019, 1000,
-                                                 128 * 1024, raft_dir,
-                                                 "127.0.0.1:9018:9019", quit_abruptly);
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9018:9019", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for node to be ready
@@ -660,8 +653,8 @@ TEST_F(RaftServerTest, RefreshNodes) {
     createRpcServer(peering_endpoint);
 
     int start_result = raft_server->start(peering_endpoint, 9021, 1000,
-                                                 128 * 1024, raft_dir,
-                                                 "127.0.0.1:9020:9021", quit_abruptly);
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9020:9021", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Wait for cluster to be ready
@@ -713,8 +706,8 @@ TEST_F(RaftServerTest, RefreshCatchupStatus) {
     createRpcServer(peering_endpoint);
 
     int start_result = raft_server->start(peering_endpoint, 9025, 1000,
-                                                 128 * 1024, raft_dir,
-                                                 "127.0.0.1:9024:9025", quit_abruptly);
+                                          128 * 1024, raft_dir,
+                                          "127.0.0.1:9024:9025", quit_abruptly);
     EXPECT_EQ(start_result, 0);
 
     // Test refresh methods (should not crash)
@@ -742,11 +735,11 @@ TEST_F(RaftServerTest, RefreshCatchupStatusWithoutStarting) {
 TEST_F(RaftServerTest, StartMultiNodeWithForcedVote) {
     auto setup = createMultiNodeSetup(this, 3);
 
-    // Start all nodes
+    // Start all nodes with ultra long timeout to ensure forced vote is needed
     for (int i = 0; i < 3; i++) {
         int start_result = setup.raft_servers[i]->start(
             setup.peering_endpoints[i], setup.api_ports[i], 5000,
-            128 * 1024, setup.raft_dirs[i], setup.nodes_config, *setup.quit_flags[i]);
+            128 * 1024, setup.raft_dirs[i], setup.nodes_config, setup.quit_flags[i]);
         EXPECT_EQ(start_result, 0);
     }
 
@@ -758,10 +751,8 @@ TEST_F(RaftServerTest, StartMultiNodeWithForcedVote) {
     EXPECT_TRUE(vote_triggered);
 
     // Wait for leader election with progressive delays (like API tests)
-    std::vector<int> delay_intervals = {100, 1000, 2000, 3000, 4000};
     bool leader_elected = false;
-
-    for (int delay : delay_intervals) {
+    for (int delay : {100, 1000, 2000, 3000, 4000}) {
         std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 
         // Refresh catchup status for all nodes
@@ -813,19 +804,17 @@ TEST_F(RaftServerTest, StartMultiNodeWithForcedVote) {
 TEST_F(RaftServerTest, StartMultiNodeAfterTimeout) {
     auto setup = createMultiNodeSetup(this, 3);
 
-    // Start all nodes
+    // Start all nodes with shorter timeout for faster natural election
     for (int i = 0; i < 3; i++) {
         int start_result = setup.raft_servers[i]->start(
-            setup.peering_endpoints[i], setup.api_ports[i], 2000, // Shorter timeout for faster natural election
-            128 * 1024, setup.raft_dirs[i], setup.nodes_config, *setup.quit_flags[i]);
+            setup.peering_endpoints[i], setup.api_ports[i], 2000,
+            128 * 1024, setup.raft_dirs[i], setup.nodes_config, setup.quit_flags[i]);
         EXPECT_EQ(start_result, 0);
     }
 
     // Wait for natural leader election (no manual trigger_vote)
-    std::vector<int> delay_intervals = {1000, 2000, 3000, 4000, 5000}; // Longer delays for natural election
     bool leader_elected = false;
-
-    for (int delay : delay_intervals) {
+    for (int delay : {1000, 2000, 3000, 4000, 5000}) {
         std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 
         // Refresh catchup status for all nodes
@@ -881,7 +870,7 @@ TEST_F(RaftServerTest, LeaderElectionMultiNodeWithForcedVote) {
     for (int i = 0; i < 3; i++) {
         int start_result = setup.raft_servers[i]->start(
             setup.peering_endpoints[i], setup.api_ports[i], 2000,
-            128 * 1024, setup.raft_dirs[i], setup.nodes_config, *setup.quit_flags[i]);
+            128 * 1024, setup.raft_dirs[i], setup.nodes_config, setup.quit_flags[i]);
         EXPECT_EQ(start_result, 0);
     }
 
@@ -893,10 +882,8 @@ TEST_F(RaftServerTest, LeaderElectionMultiNodeWithForcedVote) {
     EXPECT_TRUE(vote_triggered);
 
     // Wait for leader election to complete
-    std::vector<int> delay_intervals = {100, 1000, 2000, 3000};
     int leader_index = -1;
-
-    for (int delay : delay_intervals) {
+    for (int delay : {100, 1000, 2000, 3000}) {
         std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 
         // Refresh catchup status for all nodes
@@ -952,15 +939,13 @@ TEST_F(RaftServerTest, LeaderElectionMultiNodeAfterTimeout) {
     for (int i = 0; i < 3; i++) {
         int start_result = setup.raft_servers[i]->start(
             setup.peering_endpoints[i], setup.api_ports[i], 2000,
-            128 * 1024, setup.raft_dirs[i], setup.nodes_config, *setup.quit_flags[i]);
+            128 * 1024, setup.raft_dirs[i], setup.nodes_config, setup.quit_flags[i]);
         EXPECT_EQ(start_result, 0);
     }
 
     // Wait for natural leader election to complete (no manual trigger_vote)
-    std::vector<int> delay_intervals = {2500, 3000, 4000}; // Wait for election timeout to naturally trigger
     int leader_index = -1;
-
-    for (int delay : delay_intervals) {
+    for (int delay : {2500, 3000, 4000}) {  // Wait for election timeout to naturally trigger
         std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 
         // Refresh catchup status for all nodes
@@ -1016,7 +1001,7 @@ TEST_F(RaftServerTest, ReadWriteCaughtUpMultiNode) {
     for (int i = 0; i < 3; i++) {
         int start_result = setup.raft_servers[i]->start(
             setup.peering_endpoints[i], setup.api_ports[i], 3000,
-            128 * 1024, setup.raft_dirs[i], setup.nodes_config, *setup.quit_flags[i]);
+            128 * 1024, setup.raft_dirs[i], setup.nodes_config, setup.quit_flags[i]);
         EXPECT_EQ(start_result, 0);
     }
 
@@ -1028,9 +1013,7 @@ TEST_F(RaftServerTest, ReadWriteCaughtUpMultiNode) {
     EXPECT_TRUE(vote_triggered);
 
     // Wait for leader election and synchronization
-    std::vector<int> delay_intervals = {100, 1000, 2000, 3000, 4000};
-
-    for (int delay : delay_intervals) {
+    for (int delay : {100, 1000, 2000, 3000, 4000}) {
         std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 
         // Refresh catchup status for all nodes
@@ -1071,7 +1054,7 @@ TEST_F(RaftServerTest, RefreshNodesMultiNode) {
     for (int i = 0; i < 2; i++) {
         int start_result = setup.raft_servers[i]->start(
             setup.peering_endpoints[i], setup.api_ports[i], 3000,
-            128 * 1024, setup.raft_dirs[i], setup.nodes_config, *setup.quit_flags[i]);
+            128 * 1024, setup.raft_dirs[i], setup.nodes_config, setup.quit_flags[i]);
         EXPECT_EQ(start_result, 0);
     }
 
@@ -1082,11 +1065,9 @@ TEST_F(RaftServerTest, RefreshNodesMultiNode) {
     bool vote_triggered = setup.raft_servers[0]->trigger_vote();
     EXPECT_TRUE(vote_triggered);
 
-    // Wait for leader election
-    std::vector<int> delay_intervals = {100, 1000, 2000};
+    // Wait for leader election (using longer delays since election timeout is 3000ms)
     int leader_index = -1;
-
-    for (int delay : delay_intervals) {
+    for (int delay : {2500, 3000, 4000}) {
         std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 
         // Refresh catchup status
@@ -1110,7 +1091,7 @@ TEST_F(RaftServerTest, RefreshNodesMultiNode) {
     EXPECT_NE(leader_index, -1);
 
     // Test adding a third node via refresh_nodes
-    std::string new_nodes_config = setup.nodes_config + ",127.0.0.1:9207:9206";
+    std::string new_nodes_config = setup.nodes_config + ",127.0.0.1:9204:9205";
     std::atomic<bool> reset_peers{false};
 
     // Only leader should successfully refresh nodes
