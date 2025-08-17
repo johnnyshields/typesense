@@ -737,7 +737,7 @@ RaftServer::RaftServer(HttpServer* server, BatchedIndexer* batched_indexer,
         num_documents_parallel_load(num_documents_parallel_load),
         read_caught_up(false), write_caught_up(false),
         ready(false), shutting_down(false), pending_writes(0), snapshot_in_progress(false),
-        last_snapshot_ts(std::time(nullptr)), snapshot_interval_s(config->get_snapshot_interval_seconds()) {
+        snapshot_interval_s(config->get_snapshot_interval_seconds()), last_snapshot_ts(std::time(nullptr)) {
 
 }
 
