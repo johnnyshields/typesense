@@ -31,10 +31,10 @@ void ReplicationClosure::Run() {
 
 // State machine implementation
 
-int ReplicationState::start(const butil::EndPoint & peering_endpoint, const int api_port,
-                            int election_timeout_ms, int snapshot_max_byte_count_per_rpc,
-                            const std::string & raft_dir, const std::string & nodes,
-                            const std::atomic<bool>& quit_abruptly) {
+int RaftServer::start(const butil::EndPoint & peering_endpoint, const int api_port,
+                      int election_timeout_ms, int snapshot_max_byte_count_per_rpc,
+                      const std::string & raft_dir, const std::string & nodes,
+                      const std::atomic<bool>& quit_abruptly) {
 
     this->election_timeout_interval_ms = election_timeout_ms;
     this->raft_dir_path = raft_dir;
@@ -45,7 +45,7 @@ int ReplicationState::start(const butil::EndPoint & peering_endpoint, const int 
     size_t max_tries = 3;
 
     while(true) {
-        std::string actual_nodes_config = to_nodes_config(peering_endpoint, api_port, nodes);
+        std::string actual_nodes_config = RaftServer::to_nodes_config(peering_endpoint, api_port, nodes);
 
         if(actual_nodes_config.empty()) {
             LOG(WARNING) << "No nodes resolved from peer configuration.";
@@ -146,7 +146,7 @@ int ReplicationState::start(const butil::EndPoint & peering_endpoint, const int 
 }
 
 // can return empty string if DNS resolution fails on all nodes
-std::string ReplicationState::to_nodes_config(const butil::EndPoint& peering_endpoint, const int api_port,
+std::string RaftServer::to_nodes_config(const butil::EndPoint& peering_endpoint, const int api_port,
                                               const std::string& nodes_config) {
     if(nodes_config.empty()) {
         // endpoint2str gives us "<ip>:<peering_port>", we just need to add ":<api_port>"
@@ -156,7 +156,7 @@ std::string ReplicationState::to_nodes_config(const butil::EndPoint& peering_end
     }
 }
 
-std::string ReplicationState::hostname2ipstr(const std::string& hostname) {
+std::string RaftServer::hostname2ipstr(const std::string& hostname) {
     if(hostname.size() > 64) {
         LOG(ERROR) << "Host name is too long (must be < 64 characters): " << hostname;
         return "";
@@ -203,7 +203,7 @@ std::string ReplicationState::hostname2ipstr(const std::string& hostname) {
     return resolved_ip;
 }
 
-std::string ReplicationState::resolve_node_hosts(const string& nodes_config) {
+std::string RaftServer::resolve_node_hosts(const string& nodes_config) {
     std::vector<std::string> final_nodes_vec;
     std::vector<std::string> node_strings;
     StringUtils::split(nodes_config, node_strings, ",");
@@ -241,7 +241,7 @@ std::string ReplicationState::resolve_node_hosts(const string& nodes_config) {
     return final_nodes_config;
 }
 
-Option<bool> ReplicationState::handle_gzip(const std::shared_ptr<http_req>& request) {
+Option<bool> RaftServer::handle_gzip(const std::shared_ptr<http_req>& request) {
     if (!request->zstream_initialized) {
         request->zs.zalloc = Z_NULL;
         request->zs.zfree = Z_NULL;
@@ -289,7 +289,7 @@ Option<bool> ReplicationState::handle_gzip(const std::shared_ptr<http_req>& requ
     return Option<bool>(true);
 }
 
-void ReplicationState::write(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response) {
+void RaftServer::write(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response) {
     if(shutting_down) {
         //LOG(INFO) << "write(), force shutdown";
         response->set_503("Shutting down.");
@@ -346,7 +346,7 @@ void ReplicationState::write(const std::shared_ptr<http_req>& request, const std
     //check if it's first gzip chunk or is gzip stream initialized
     if(((request->body.size() > 2) &&
         (31 == (int)request->body[0] && -117 == (int)request->body[1])) || request->zstream_initialized) {
-        auto res = handle_gzip(request);
+        auto res = RaftServer::handle_gzip(request);
 
         if(!res.ok()) {
             response->set_422(res.error());
@@ -384,7 +384,7 @@ void ReplicationState::write(const std::shared_ptr<http_req>& request, const std
     pending_writes++;
 }
 
-void ReplicationState::write_to_leader(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response) {
+void RaftServer::write_to_leader(const std::shared_ptr<http_req>& request, const std::shared_ptr<http_res>& response) {
     // no lock on `node` needed as caller uses the lock
     if(!node || node->leader_id().is_empty()) {
         // Handle no leader scenario
@@ -419,7 +419,7 @@ void ReplicationState::write_to_leader(const std::shared_ptr<http_req>& request,
     auto raw_req = request->_req;
     const std::string& path = std::string(raw_req->path.base, raw_req->path.len);
     const std::string& scheme = std::string(raw_req->scheme->name.base, raw_req->scheme->name.len);
-    const std::string url = get_node_url_path(leader_addr, path, scheme);
+    const std::string url = RaftServer::get_node_url_path(leader_addr, path, scheme);
 
     thread_pool->enqueue([request, response, server, path, url, this]() {
         pending_writes++;
@@ -475,7 +475,7 @@ void ReplicationState::write_to_leader(const std::shared_ptr<http_req>& request,
     });
 }
 
-std::string ReplicationState::get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
+std::string RaftServer::get_node_url_path(const braft::PeerId& peer_id, const std::string& path,
                                                 const std::string& protocol) const {
     const std::string endpoint_str = butil::endpoint2str(peer_id.addr).c_str();
     const size_t last_colon = endpoint_str.rfind(':');
@@ -504,8 +504,8 @@ std::string ReplicationState::get_node_url_path(const braft::PeerId& peer_id, co
     return url;
 }
 
-void ReplicationState::on_apply(braft::Iterator& iter) {
-    //LOG(INFO) << "ReplicationState::on_apply";
+void RaftServer::on_apply(braft::Iterator& iter) {
+    //LOG(INFO) << "RaftServer::on_apply";
     // NOTE: this is executed on a different thread and runs concurrent to http thread
     // A batch of tasks are committed, which must be processed through
     // |iter|
@@ -542,13 +542,13 @@ void ReplicationState::on_apply(braft::Iterator& iter) {
     }
 }
 
-void ReplicationState::read(const std::shared_ptr<http_res>& response) {
+void RaftServer::read(const std::shared_ptr<http_res>& response) {
     // NOT USED:
     // For consistency, reads to followers could be rejected.
     // Currently, we don't do implement reads via raft.
 }
 
-void* ReplicationState::save_snapshot(void* arg) {
+void* RaftServer::save_snapshot(void* arg) {
     LOG(INFO) << "save_snapshot called";
 
     SnapshotArg* sa = static_cast<SnapshotArg*>(arg);
@@ -561,7 +561,7 @@ void* ReplicationState::save_snapshot(void* arg) {
         std::string file_name = std::string(db_snapshot_name) + "/" + file.BaseName().value();
         if (sa->writer->add_file(file_name) != 0) {
             sa->done->status().set_error(EIO, "Fail to add file to writer.");
-            sa->replication_state->snapshot_in_progress = false;
+            sa->raft_server->snapshot_in_progress = false;
             return nullptr;
         }
     }
@@ -574,7 +574,7 @@ void* ReplicationState::save_snapshot(void* arg) {
             auto file_name = std::string(analytics_db_snapshot_name) + "/" + file.BaseName().value();
             if (sa->writer->add_file(file_name) != 0) {
                 sa->done->status().set_error(EIO, "Fail to add analytics file to writer.");
-                sa->replication_state->snapshot_in_progress = false;
+                sa->raft_server->snapshot_in_progress = false;
                 return nullptr;
             }
         }
@@ -584,7 +584,7 @@ void* ReplicationState::save_snapshot(void* arg) {
 
     // NOTE: *must* do a dummy write here since snapshots cannot be triggered if no write has happened since the
     // last snapshot. By doing a dummy write right after a snapshot, we ensure that this can never be the case.
-    sa->replication_state->do_dummy_write();
+    sa->raft_server->do_dummy_write();
 
     LOG(INFO) << "save_snapshot done";
 
@@ -592,7 +592,7 @@ void* ReplicationState::save_snapshot(void* arg) {
 }
 
 // this method is serial to on_apply so guarantees a snapshot view of the state machine
-void ReplicationState::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
+void RaftServer::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
     LOG(INFO) << "on_snapshot_save";
 
     snapshot_in_progress = true;
@@ -637,7 +637,7 @@ void ReplicationState::on_snapshot_save(braft::SnapshotWriter* writer, braft::Cl
     }
 
     SnapshotArg* arg = new SnapshotArg;
-    arg->replication_state = this;
+    arg->raft_server = this;
     arg->writer = writer;
     arg->state_dir_path = raft_dir_path;
     arg->db_snapshot_path = db_snapshot_path;
@@ -656,7 +656,7 @@ void ReplicationState::on_snapshot_save(braft::SnapshotWriter* writer, braft::Cl
     bthread_start_urgent(&tid, NULL, save_snapshot, arg);
 }
 
-int ReplicationState::init_db() {
+int RaftServer::init_db() {
     LOG(INFO) << "Loading collections from disk...";
 
     Option<bool> init_op = CollectionManager::get_instance().load(
@@ -698,7 +698,7 @@ int ReplicationState::init_db() {
     return 0;
 }
 
-int ReplicationState::on_snapshot_load(braft::SnapshotReader* reader) {
+int RaftServer::on_snapshot_load(braft::SnapshotReader* reader) {
     std::shared_lock lock(node_mutex);
     CHECK(!node || !node->is_leader()) << "Leader is not supposed to load snapshot";
     lock.unlock();
@@ -736,8 +736,8 @@ int ReplicationState::on_snapshot_load(braft::SnapshotReader* reader) {
     return init_db_status;
 }
 
-void ReplicationState::refresh_nodes(const std::string & nodes, const size_t raft_counter,
-                                     const std::atomic<bool>& reset_peers_on_error) {
+void RaftServer::refresh_nodes(const std::string & nodes, const size_t raft_counter,
+                               const std::atomic<bool>& reset_peers_on_error) {
     std::shared_lock lock(node_mutex);
 
     if(!node) {
@@ -787,7 +787,7 @@ void ReplicationState::refresh_nodes(const std::string & nodes, const size_t raf
     }
 }
 
-void ReplicationState::refresh_catchup_status(bool log_msg) {
+void RaftServer::refresh_catchup_status(bool log_msg) {
     std::shared_lock lock(node_mutex);
     if(node == nullptr ) {
         read_caught_up = write_caught_up = false;
@@ -865,7 +865,7 @@ void ReplicationState::refresh_catchup_status(bool log_msg) {
     lock.unlock();
 
     const std::string protocol = api_uses_ssl ? "https" : "http";
-    std::string url = get_node_url_path(leader_addr, "/status", protocol);
+    std::string url = RaftServer::get_node_url_path(leader_addr, "/status", protocol);
 
     std::string api_res;
     std::map<std::string, std::string> res_headers;
@@ -891,11 +891,11 @@ void ReplicationState::refresh_catchup_status(bool log_msg) {
     }
 }
 
-ReplicationState::ReplicationState(HttpServer* server, BatchedIndexer* batched_indexer,
-                                   Store *store, Store* analytics_store, ThreadPool* thread_pool,
-                                   http_message_dispatcher *message_dispatcher,
-                                   bool api_uses_ssl, const Config* config,
-                                   size_t num_collections_parallel_load, size_t num_documents_parallel_load):
+RaftServer::RaftServer(HttpServer* server, BatchedIndexer* batched_indexer,
+                       Store *store, Store* analytics_store, ThreadPool* thread_pool,
+                       http_message_dispatcher *message_dispatcher,
+                       bool api_uses_ssl, const Config* config,
+                       size_t num_collections_parallel_load, size_t num_documents_parallel_load):
         node(nullptr), leader_term(-1), server(server), batched_indexer(batched_indexer),
         store(store), analytics_store(analytics_store),
         thread_pool(thread_pool), message_dispatcher(message_dispatcher), api_uses_ssl(api_uses_ssl),
@@ -904,16 +904,16 @@ ReplicationState::ReplicationState(HttpServer* server, BatchedIndexer* batched_i
         num_documents_parallel_load(num_documents_parallel_load),
         read_caught_up(false), write_caught_up(false),
         ready(false), shutting_down(false), pending_writes(0), snapshot_in_progress(false),
-        last_snapshot_ts(std::time(nullptr)), snapshot_interval_s(config->get_snapshot_interval_seconds()) {
+        snapshot_interval_s(config->get_snapshot_interval_seconds()), last_snapshot_ts(std::time(nullptr)) {
 
 }
 
-bool ReplicationState::is_alive() const {
+bool RaftServer::is_alive() const {
     // for general health check we will only care about the `read_caught_up` threshold
     return read_caught_up;
 }
 
-uint64_t ReplicationState::node_state() const {
+uint64_t RaftServer::node_state() const {
     std::shared_lock lock(node_mutex);
 
     if(node == nullptr) {
@@ -926,8 +926,8 @@ uint64_t ReplicationState::node_state() const {
     return node_status.state;
 }
 
-void ReplicationState::do_snapshot(const std::string& snapshot_path, const std::shared_ptr<http_req>& req,
-                                   const std::shared_ptr<http_res>& res) {
+void RaftServer::do_snapshot(const std::string& snapshot_path, const std::shared_ptr<http_req>& req,
+                             const std::shared_ptr<http_res>& res) {
     if(node == nullptr) {
         res->set_500("Could not trigger a snapshot, as node is not initialized.");
         auto req_res = new async_req_res_t(req, res, true);
@@ -954,15 +954,15 @@ void ReplicationState::do_snapshot(const std::string& snapshot_path, const std::
     });
 }
 
-void ReplicationState::set_ext_snapshot_path(const std::string& snapshot_path) {
+void RaftServer::set_ext_snapshot_path(const std::string& snapshot_path) {
     this->ext_snapshot_path = snapshot_path;
 }
 
-void ReplicationState::set_snapshot_in_progress(const bool snapshot_in_progress) {
+void RaftServer::set_snapshot_in_progress(const bool snapshot_in_progress) {
     this->snapshot_in_progress = snapshot_in_progress;
 }
 
-void ReplicationState::do_dummy_write() {
+void RaftServer::do_dummy_write() {
     std::shared_lock lock(node_mutex);
 
     if(!node || node->leader_id().is_empty()) {
@@ -974,7 +974,7 @@ void ReplicationState::do_dummy_write() {
     lock.unlock();
 
     const std::string protocol = api_uses_ssl ? "https" : "http";
-    std::string url = get_node_url_path(leader_addr, "/health", protocol);
+    std::string url = RaftServer::get_node_url_path(leader_addr, "/health", protocol);
 
     std::string api_res;
     std::map<std::string, std::string> res_headers;
@@ -983,7 +983,7 @@ void ReplicationState::do_dummy_write() {
     LOG(INFO) << "Dummy write to " << url << ", status = " << status_code << ", response = " << api_res;
 }
 
-bool ReplicationState::trigger_vote() {
+bool RaftServer::trigger_vote() {
     std::shared_lock lock(node_mutex);
 
     if(node) {
@@ -995,7 +995,7 @@ bool ReplicationState::trigger_vote() {
     return false;
 }
 
-bool ReplicationState::reset_peers() {
+bool RaftServer::reset_peers() {
     std::shared_lock lock(node_mutex);
 
     if(node) {
@@ -1005,9 +1005,9 @@ bool ReplicationState::reset_peers() {
             return false;
         }
 
-        const std::string& nodes_config = ReplicationState::to_nodes_config(peering_endpoint,
-                                                                            Config::get_instance().get_api_port(),
-                                                                            refreshed_nodes_op.get());
+        const std::string& nodes_config = RaftServer::to_nodes_config(peering_endpoint,
+                                                                      Config::get_instance().get_api_port(),
+                                                                      refreshed_nodes_op.get());
 
         if(nodes_config.empty()) {
             LOG(WARNING) << "No nodes resolved from peer configuration.";
@@ -1029,15 +1029,15 @@ bool ReplicationState::reset_peers() {
     return false;
 }
 
-http_message_dispatcher* ReplicationState::get_message_dispatcher() const {
+http_message_dispatcher* RaftServer::get_message_dispatcher() const {
     return message_dispatcher;
 }
 
-Store* ReplicationState::get_store() {
+Store* RaftServer::get_store() {
     return store;
 }
 
-void ReplicationState::shutdown() {
+void RaftServer::shutdown() {
     LOG(INFO) << "Set shutting_down = true";
     shutting_down = true;
 
@@ -1048,7 +1048,7 @@ void ReplicationState::shutdown() {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
 
-    LOG(INFO) << "Replication state shutdown, store sequence: " << store->get_latest_seq_number();
+    LOG(INFO) << "Raft server shutdown, store sequence: " << store->get_latest_seq_number();
     std::unique_lock lock(node_mutex);
 
     if (node) {
@@ -1063,7 +1063,7 @@ void ReplicationState::shutdown() {
     }
 }
 
-void ReplicationState::persist_applying_index() {
+void RaftServer::persist_applying_index() {
     std::shared_lock lock(node_mutex);
 
     if(node == nullptr) {
@@ -1075,11 +1075,11 @@ void ReplicationState::persist_applying_index() {
     batched_indexer->persist_applying_index();
 }
 
-int64_t ReplicationState::get_num_queued_writes() {
+int64_t RaftServer::get_num_queued_writes() {
     return batched_indexer->get_queued_writes();
 }
 
-bool ReplicationState::is_leader() {
+bool RaftServer::is_leader() {
     std::shared_lock lock(node_mutex);
 
     if(!node) {
@@ -1089,7 +1089,7 @@ bool ReplicationState::is_leader() {
     return node->is_leader();
 }
 
-nlohmann::json ReplicationState::get_status() {
+nlohmann::json RaftServer::get_status() {
     nlohmann::json status;
 
     std::shared_lock lock(node_mutex);
@@ -1112,7 +1112,7 @@ nlohmann::json ReplicationState::get_status() {
     return status;
 }
 
-void ReplicationState::do_snapshot(const std::string& nodes) {
+void RaftServer::do_snapshot(const std::string& nodes) {
     auto current_ts = std::time(nullptr);
     if(current_ts - last_snapshot_ts < snapshot_interval_s) {
         //LOG(INFO) << "Skipping snapshot: not enough time has elapsed.";
@@ -1147,7 +1147,7 @@ void ReplicationState::do_snapshot(const std::string& nodes) {
             }
 
             const std::string protocol = api_uses_ssl ? "https" : "http";
-            std::string url = get_node_url_path(peer, "/health", protocol);
+            std::string url = RaftServer::get_node_url_path(peer, "/health", protocol);
             std::string api_res;
             std::map<std::string, std::string> res_headers;
             long status_code = HttpClient::get_response(url, api_res, res_headers, {}, 5*1000, true);
@@ -1174,7 +1174,7 @@ void ReplicationState::do_snapshot(const std::string& nodes) {
     last_snapshot_ts = current_ts;
 }
 
-std::string ReplicationState::get_leader_url() const {
+std::string RaftServer::get_leader_url() const {
     std::shared_lock lock(node_mutex);
 
     if(!node) {
@@ -1191,10 +1191,10 @@ std::string ReplicationState::get_leader_url() const {
     lock.unlock();
 
     const std::string protocol = api_uses_ssl ? "https" : "http";
-    return get_node_url_path(leader_addr, "/", protocol);
+    return RaftServer::get_node_url_path(leader_addr, "/", protocol);
 }
 
-void ReplicationState::decr_pending_writes() {
+void RaftServer::decr_pending_writes() {
     pending_writes--;
 }
 
@@ -1208,7 +1208,7 @@ void TimedSnapshotClosure::Run() {
         LOG(ERROR) << "Timed snapshot failed, error: " << status().error_str() << ", code: " << status().error_code();
     }
 
-    replication_state->set_snapshot_in_progress(false);
+    raft_server->set_snapshot_in_progress(false);
 }
 
 void OnDemandSnapshotClosure::Run() {
@@ -1235,8 +1235,8 @@ void OnDemandSnapshotClosure::Run() {
     }
 
     // order is important, because the atomic boolean guards write to the path
-    replication_state->set_ext_snapshot_path("");
-    replication_state->set_snapshot_in_progress(false);
+    raft_server->set_ext_snapshot_path("");
+    raft_server->set_snapshot_in_progress(false);
 
     req->last_chunk_aggregate = true;
     res->final = true;
@@ -1265,7 +1265,7 @@ void OnDemandSnapshotClosure::Run() {
     res->body = response.dump();
 
     auto req_res = new async_req_res_t(req, res, true);
-    replication_state->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
+    raft_server->get_message_dispatcher()->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
 
     // wait for response to be sent
     res->wait();
