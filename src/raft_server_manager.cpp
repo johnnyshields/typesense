@@ -20,6 +20,10 @@ int RaftServerManager::start_server(RaftServer& server, Store& store,
                                    const std::atomic<bool>& reset_peers_flag,
                                    const std::atomic<bool>& quit_service) {
 
+    LOG(INFO) << "RaftServerManager::start_server() CALLED from thread: " << std::this_thread::get_id();
+    LOG(INFO) << "  nodes_path: '" << nodes_path << "'";
+    LOG(INFO) << "  quit_service address: " << &quit_service << ", current value: " << quit_service.load();
+
     // Store configuration
     raft_server = &server;
     path_to_nodes = nodes_path;
@@ -63,10 +67,18 @@ int RaftServerManager::start_server(RaftServer& server, Store& store,
     LOG(INFO) << "Snapshot max byte count configured as: " << max_byte_count_per_rpc;
 
     // Run monitoring loop synchronously - blocks until shutdown
-    LOG(INFO) << "Raft monitoring started";
+    LOG(INFO) << "Raft monitoring started - ENTERING BLOCKING LOOP";
+    LOG(INFO) << "  Monitoring quit_service at address: " << &quit_service;
+    LOG(INFO) << "  Initial brpc::IsAskedToQuit(): " << brpc::IsAskedToQuit();
+    LOG(INFO) << "  Initial quit_service.load(): " << quit_service.load();
 
     size_t raft_counter = 0;
     while (!brpc::IsAskedToQuit() && !quit_service.load()) {
+        if (raft_counter % 30 == 0) {  // Log every 30 seconds to avoid spam
+            LOG(INFO) << "RaftServerManager monitoring loop iteration " << raft_counter
+                      << " (brpc::IsAskedToQuit=" << brpc::IsAskedToQuit()
+                      << ", quit_service=" << quit_service.load() << ")";
+        }
         // Refresh peer configuration every 10 seconds
         if (raft_counter % PEER_CONFIG_REFRESH_INTERVAL == 0) {
             refresh_peer_configuration(raft_counter);
@@ -81,7 +93,10 @@ int RaftServerManager::start_server(RaftServer& server, Store& store,
         sleep(1);
     }
 
-    LOG(INFO) << "Raft monitoring stopped";
+    LOG(INFO) << "Raft monitoring stopped - EXITING BLOCKING LOOP";
+    LOG(INFO) << "  Final brpc::IsAskedToQuit(): " << brpc::IsAskedToQuit();
+    LOG(INFO) << "  Final quit_service.load(): " << quit_service.load();
+    LOG(INFO) << "  Total iterations: " << raft_counter;
 
     // Cleanup on shutdown
     LOG(INFO) << "Typesense peering service is going to quit.";
@@ -149,12 +164,35 @@ int RaftServerManager::initialize_raft_server(RaftServer& server,
                                              uint32_t port,
                                              int max_byte_count_per_rpc,
                                              const std::string& state_dir,
-                                             const std::string& nodes_config,
-                                             const std::atomic<bool>& quit_service) {
+                                             const std::string& nodes_config) {
     size_t election_timeout_ms = 5000;
 
-    if (server.start(endpoint, port, election_timeout_ms, max_byte_count_per_rpc, state_dir,
-                     nodes_config, quit_service) != 0) {
+    std::atomic<bool> start_completed{false};
+    std::atomic<int> start_result{-1};
+
+    std::thread start_thread([&]() {
+        LOG(INFO) << "Starting server.start() in separate thread";
+        start_result = server.start(endpoint, port, election_timeout_ms,
+                                   max_byte_count_per_rpc, state_dir,
+                                   nodes_config, quit_service);
+        start_completed = true;
+        LOG(INFO) << "server.start() completed with result: " << start_result.load();
+    });
+
+    // Wait up to 10 seconds for start to complete
+    for(int i = 0; i < 100 && !start_completed; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    if (!start_completed) {
+        LOG(ERROR) << "server.start() appears to be blocking!";
+        start_thread.detach();
+        return -1;
+    }
+
+    start_thread.join();
+
+    if (start_result != 0) {
         LOG(ERROR) << "Failed to start peering state";
         return -1;
     }

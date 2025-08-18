@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <butil/endpoint.h>
+#include "logger.h"
 #include <brpc/server.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -19,6 +20,7 @@ public:
     // Singleton access
     static RaftServerManager& get_instance() {
         static RaftServerManager instance;
+        LOG(INFO) << "RaftServerManager::get_instance() called from thread: " << std::this_thread::get_id();
         return instance;
     }
 

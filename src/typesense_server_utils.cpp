@@ -57,6 +57,7 @@ bool using_jemalloc() {
 
 void catch_interrupt(int sig) {
     LOG(INFO) << "Stopping Typesense server...";
+    LOG(INFO) << "Signal " << sig << " caught, setting global quit_raft_service=true at address: " << &quit_raft_service;
     signal(sig, SIG_IGN);  // ignore for now as we want to shut down elegantly
     quit_raft_service = true;
 }
@@ -198,6 +199,7 @@ int run_server(const Config & config, const std::string & version, void (*master
 #endif
 
     quit_raft_service = false;
+    LOG(INFO) << "Global quit_raft_service initialized to false at address: " << &quit_raft_service;
 
     if(!directory_exists(config.get_data_dir())) {
         LOG(ERROR) << "Typesense failed to start. " << "Data directory " << config.get_data_dir()
@@ -378,6 +380,8 @@ int run_server(const Config & config, const std::string & version, void (*master
         RemoteEmbedder::init(&raft_server);
 
         // Start raft server using RaftServerManager
+        LOG(INFO) << "About to call RaftServerManager from production code";
+        LOG(INFO) << "  Passing quit_raft_service at address: " << &quit_raft_service << ", value: " << quit_raft_service.load();
         RaftServerManager& raft_manager = RaftServerManager::get_instance();
         std::string path_to_nodes = config.get_nodes();
         raft_manager.start_server(raft_server, store, state_dir, path_to_nodes,
@@ -434,6 +438,7 @@ int run_server(const Config & config, const std::string & version, void (*master
     // we are out of the event loop here
 
     LOG(INFO) << "Typesense API service has quit.";
+    LOG(INFO) << "Setting global quit_raft_service=true at address: " << &quit_raft_service;
     quit_raft_service = true;  // we set this once again in case API thread crashes instead of a signal
     raft_thread.join();
 

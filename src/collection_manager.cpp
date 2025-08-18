@@ -428,6 +428,7 @@ Option<bool> CollectionManager::load(const size_t collection_batch_size, const s
 
     const size_t num_collections = collection_meta_jsons.size();
     LOG(INFO) << "Found " << num_collections << " collection(s) on disk.";
+    LOG(INFO) << "DEBUG: About to enter collection loading loop with num_collections=" << num_collections;
 
     if (!store->contains(REFERENCED_INS)) {
         _populate_referenced_ins(collection_meta_jsons, referenced_ins);
@@ -481,7 +482,9 @@ Option<bool> CollectionManager::load(const size_t collection_batch_size, const s
     std::condition_variable cv_process;
     std::string collection_name;
 
+    LOG(INFO) << "DEBUG: Starting collection loading loop, num_collections=" << num_collections;
     for(size_t coll_index = 0; coll_index < num_collections; coll_index++) {
+        LOG(INFO) << "DEBUG: Processing collection " << coll_index << " of " << num_collections;
         const auto& collection_meta_json = collection_meta_jsons[coll_index];
         nlohmann::json collection_meta = nlohmann::json::parse(collection_meta_json, nullptr, false);
         if(collection_meta.is_discarded()) {
@@ -525,11 +528,20 @@ Option<bool> CollectionManager::load(const size_t collection_batch_size, const s
     }
 
     // wait for all collections to be loaded
+    LOG(INFO) << "DEBUG: About to wait for collections to load. num_processed=" << num_processed 
+              << ", num_collections=" << num_collections;
     std::unique_lock<std::mutex> lock_process(m_process);
     cv_process.wait(lock_process, [&](){
-        return num_processed == num_collections;
+        bool should_continue = num_processed == num_collections;
+        if (!should_continue) {
+            LOG(INFO) << "DEBUG: Still waiting - num_processed=" << num_processed 
+                      << ", num_collections=" << num_collections;
+        }
+        return should_continue;
         // return num_processed == 1;
     });
+    LOG(INFO) << "DEBUG: Finished waiting for collections. num_processed=" << num_processed 
+              << ", num_collections=" << num_collections;
 
     // load presets
 
