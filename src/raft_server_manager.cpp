@@ -22,21 +22,27 @@ int RaftServerManager::start_raft_server(ReplicationState& replication_state, St
                       uint32_t api_port, int snapshot_interval_seconds, int snapshot_max_byte_count_per_rpc,
                       const std::atomic<bool>& reset_peers_on_error) {
 
+    LOG(INFO) << "RaftServerManager::start_raft_server called";
+
     if(path_to_nodes.empty()) {
         LOG(INFO) << "Since no --nodes argument is provided, starting a single node Typesense cluster.";
     }
 
+    LOG(INFO) << "Fetching nodes config from path: " << (path_to_nodes.empty() ? "[empty]" : path_to_nodes);
     const Option<std::string>& nodes_config_op = Config::fetch_nodes_config(path_to_nodes);
 
     if(!nodes_config_op.ok()) {
-        LOG(ERROR) << nodes_config_op.error();
+        LOG(ERROR) << "Failed to fetch nodes config: " << nodes_config_op.error();
         return -1;
     }
+    LOG(INFO) << "Nodes config fetched successfully";
 
+    LOG(INFO) << "Configuring peering endpoint...";
     butil::EndPoint peering_endpoint;
     int ip_conv_status = 0;
 
     if(!peering_address.empty()) {
+        LOG(INFO) << "Using explicit peering address: " << peering_address;
         // If IPv6 address and not already wrapped in [], wrap it
         std::string normalized_addr = peering_address;
         if(peering_address.find(':') != std::string::npos &&
@@ -50,38 +56,55 @@ int RaftServerManager::start_raft_server(ReplicationState& replication_state, St
             LOG(ERROR) << "Failed to parse peering address `" << normalized_addr << "`";
             return -1;
         }
+        LOG(INFO) << "Peering endpoint parsed successfully: " << peering_endpoint;
     } else {
+        LOG(INFO) << "Auto-detecting internal endpoint with subnet: " << (peering_subnet.empty() ? "[empty]" : peering_subnet);
         peering_endpoint = get_internal_endpoint(peering_subnet, peering_port);
+        LOG(INFO) << "Auto-detected peering endpoint: " << peering_endpoint;
     }
 
     // start peering server
+    LOG(INFO) << "Starting peering server...";
     brpc::Server peering_server;
 
+    LOG(INFO) << "Adding braft service to peering server...";
     if (braft::add_service(&peering_server, peering_endpoint) != 0) {
         LOG(ERROR) << "Failed to add peering service";
         exit(-1); // TODO: Return error instead of exit
     }
 
+    LOG(INFO) << "Starting peering server on endpoint: " << peering_endpoint;
     if (peering_server.Start(peering_endpoint, nullptr) != 0) {
         LOG(ERROR) << "Failed to start peering service";
         exit(-1); // TODO: Return error instead of exit
     }
+    LOG(INFO) << "Peering server started successfully";
 
     size_t election_timeout_ms = 5000;
+    LOG(INFO) << "Starting replication state with election timeout: " << election_timeout_ms << "ms";
 
     if (replication_state.start(peering_endpoint, api_port, election_timeout_ms, snapshot_max_byte_count_per_rpc, state_dir,
                                 nodes_config_op.get(), quit_raft_service) != 0) {
         LOG(ERROR) << "Failed to start peering state";
         exit(-1); // TODO: shutdown_peering_server and return error instead of exit
     }
+    LOG(INFO) << "Replication state started successfully";
 
     LOG(INFO) << "Typesense peering service is running on " << peering_server.listen_address();
     LOG(INFO) << "Snapshot interval configured as: " << snapshot_interval_seconds << "s";
     LOG(INFO) << "Snapshot max byte count configured as: " << snapshot_max_byte_count_per_rpc;
 
     // Wait until 'CTRL-C' is pressed. then Stop() and Join() the service
+    LOG(INFO) << "Entering main raft service loop...";
     size_t raft_counter = 0;
     while (!brpc::IsAskedToQuit() && !quit_raft_service.load()) {
+        // Log every 30 seconds to show the loop is running
+        if(raft_counter % 30 == 0) {
+            LOG(INFO) << "Raft service main loop iteration: " << raft_counter
+                      << " (quit_raft_service: " << quit_raft_service.load()
+                      << ", IsAskedToQuit: " << brpc::IsAskedToQuit() << ")";
+        }
+
         if(raft_counter % 10 == 0) {
             // reset peer configuration periodically to identify change in cluster membership
             const Option<std::string> & refreshed_nodes_op = Config::fetch_nodes_config(path_to_nodes);
@@ -95,6 +118,7 @@ int RaftServerManager::start_raft_server(ReplicationState& replication_state, St
                 } else {
                     replication_state.refresh_nodes(nodes_config, raft_counter, reset_peers_on_error);
                     if(raft_counter % 60 == 0) {
+                        LOG(INFO) << "Performing snapshot at raft_counter: " << raft_counter;
                         replication_state.do_snapshot(nodes_config);
                     }
                 }
@@ -110,6 +134,10 @@ int RaftServerManager::start_raft_server(ReplicationState& replication_state, St
         raft_counter++;
         sleep(1);
     }
+
+    LOG(INFO) << "Exiting main raft service loop. Final raft_counter: " << raft_counter
+              << " (quit_raft_service: " << quit_raft_service.load()
+              << ", IsAskedToQuit: " << brpc::IsAskedToQuit() << ")";
 
     LOG(INFO) << "Typesense peering service is going to quit.";
     // Stop replication_state before peering_server

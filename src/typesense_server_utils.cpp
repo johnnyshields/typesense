@@ -182,6 +182,7 @@ int init_root_logger(Config & config, const std::string & server_version) {
 
 int run_server(const Config & config, const std::string & version, void (*master_server_routes)()) {
     LOG(INFO) << "Starting Typesense " << version << std::flush;
+    LOG(INFO) << "Core initialization starting...";
 #ifndef ASAN_BUILD
     if(using_jemalloc()) {
         LOG(INFO) << "Typesense is using jemalloc.";
@@ -201,12 +202,14 @@ int run_server(const Config & config, const std::string & version, void (*master
 #endif
 
     quit_raft_service = false;
+    LOG(INFO) << "Checking data directory: " << config.get_data_dir();
 
     if(!directory_exists(config.get_data_dir())) {
         LOG(ERROR) << "Typesense failed to start. " << "Data directory " << config.get_data_dir()
                  << " does not exist.";
         return 1;
     }
+    LOG(INFO) << "Data directory check passed";
 
     if (config.get_enable_search_analytics() && !config.get_analytics_dir().empty() &&
         !directory_exists(config.get_analytics_dir())) {
@@ -244,6 +247,7 @@ int run_server(const Config & config, const std::string & version, void (*master
 
     size_t thread_pool_size = config.get_thread_pool_size();
 
+    LOG(INFO) << "Calculating thread pool sizes...";
     const size_t proc_count = std::max<size_t>(1, std::thread::hardware_concurrency());
     const size_t num_threads = thread_pool_size == 0 ? (proc_count * 8) : thread_pool_size;
 
@@ -251,17 +255,23 @@ int run_server(const Config & config, const std::string & version, void (*master
     num_collections_parallel_load = (num_collections_parallel_load == 0) ?
                                     (proc_count * 4) : num_collections_parallel_load;
 
-    LOG(INFO) << "Thread pool size: " << num_threads;
+    LOG(INFO) << "Thread pool size: " << num_threads << " (proc_count: " << proc_count << ")";
+    LOG(INFO) << "Creating thread pools...";
     ThreadPool app_thread_pool(num_threads);
     ThreadPool server_thread_pool(num_threads);
     ThreadPool replication_thread_pool(num_threads);
+    LOG(INFO) << "Thread pools created successfully";
 
     // primary DB used for storing the documents: we will not use WAL since Raft provides that
+    LOG(INFO) << "Initializing primary store at: " << db_dir;
     Store store(db_dir, 24*60*60, 1024, true, 0, db_write_buffer_size, db_max_write_buffer_number,
                 db_max_log_file_size, db_keep_log_file_num);
+    LOG(INFO) << "Primary store initialized successfully";
 
     // meta DB for storing house keeping things
+    LOG(INFO) << "Initializing meta store at: " << meta_dir;
     Store meta_store(meta_dir, 24*60*60, 1024, false);
+    LOG(INFO) << "Meta store initialized successfully";
 
     Store* analytics_store = nullptr;
     if(!analytics_dir.empty()) {
@@ -283,12 +293,18 @@ int run_server(const Config & config, const std::string & version, void (*master
         analytics_store = new Store(analytics_db_dir, 24*60*60, 1024, true, analytics_db_ttl);
     }
 
+    LOG(INFO) << "Initializing AnalyticsManager...";
     AnalyticsManager::get_instance().init(&store, analytics_store, analytics_minute_rate_limit);
+    LOG(INFO) << "AnalyticsManager initialized successfully";
+
+    LOG(INFO) << "Setting up RemoteEmbedder cache capacity: " << config.get_embedding_cache_num_entries();
     RemoteEmbedder::cache.capacity(config.get_embedding_cache_num_entries());
 
+    LOG(INFO) << "Initializing CURL and HttpClient...";
     curl_global_init(CURL_GLOBAL_SSL);
     HttpClient & httpClient = HttpClient::get_instance();
     httpClient.init(config.get_api_key());
+    LOG(INFO) << "HttpClient initialized successfully";
 
     server = new HttpServer(
         version,
@@ -310,12 +326,16 @@ int run_server(const Config & config, const std::string & version, void (*master
 
     bool ssl_enabled = (!config.get_ssl_cert().empty() && !config.get_ssl_cert_key().empty());
 
+    LOG(INFO) << "Creating BatchedIndexer...";
     BatchedIndexer* batch_indexer = new BatchedIndexer(server, &store, &meta_store, num_threads,
                                                        config, config.get_skip_writes());
+    LOG(INFO) << "BatchedIndexer created successfully";
 
+    LOG(INFO) << "Initializing CollectionManager...";
     CollectionManager & collectionManager = CollectionManager::get_instance();
     collectionManager.init(&store, &app_thread_pool, config.get_max_memory_ratio(),
                            config.get_api_key(), quit_raft_service, config.get_filter_by_max_ops());
+    LOG(INFO) << "CollectionManager initialized successfully";
 
     StopwordsManager& stopwordsManager = StopwordsManager::get_instance();
     stopwordsManager.init(&store);
@@ -357,8 +377,10 @@ int run_server(const Config & config, const std::string & version, void (*master
         LOG(INFO) << "Loaded " << natural_language_search_init.get() << " natural language search model(s).";
     }
 
+    LOG(INFO) << "Starting raft thread...";
     std::thread raft_thread([&replication_state, &store, &config, &state_dir,
                              &app_thread_pool, &server_thread_pool, &replication_thread_pool, batch_indexer]() {
+        LOG(INFO) << "Inside raft thread, starting initialization...";
 
         std::thread batch_indexing_thread([batch_indexer]() {
             batch_indexer->run();
@@ -378,14 +400,18 @@ int run_server(const Config & config, const std::string & version, void (*master
             HouseKeeper::get_instance().run();
         });
 
+        LOG(INFO) << "Initializing RemoteEmbedder...";
         RemoteEmbedder::init(&replication_state);
+        LOG(INFO) << "RemoteEmbedder initialized successfully";
 
         // RaftServerManager is the core "run loop" of the application. It will either:
         // 1. return(-1) if failure occurs before starting the raft server
         // 2. Do a hard exit(-1) if it cannot start the raft server
         // 3. return(0) for graceful shutdown (e.g. SIGINT received)
+        LOG(INFO) << "Getting RaftServerManager instance and starting raft server...";
         RaftServerManager& raft_manager = RaftServerManager::get_instance();
         std::string path_to_nodes = config.get_nodes();
+        LOG(INFO) << "Calling start_raft_server with nodes: " << (path_to_nodes.empty() ? "[empty]" : path_to_nodes);
         raft_manager.start_raft_server(replication_state, store, state_dir, path_to_nodes,
                                        config.get_peering_address(),
                                        config.get_peering_port(),
@@ -394,6 +420,7 @@ int run_server(const Config & config, const std::string & version, void (*master
                                        config.get_snapshot_interval_seconds(),
                                        config.get_snapshot_max_byte_count_per_rpc(),
                                        config.get_reset_peers_on_error());
+        LOG(INFO) << "start_raft_server returned, beginning shutdown sequence...";
 
         LOG(INFO) << "Shutting down batch indexer...";
         batch_indexer->stop();
