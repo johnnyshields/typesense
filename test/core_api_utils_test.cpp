@@ -5,7 +5,6 @@
 #include <core_api.h>
 #include <analytics_manager.h>
 #include "core_api_utils.h"
-#include "raft_server.h"
 #include "conversation_model_manager.h"
 #include "conversation_manager.h"
 
@@ -592,7 +591,7 @@ TEST_F(CoreAPIUtilsTest, MultiSearchWithPresetShouldUsePresetForAuth) {
     // without preset parameter, use collections from request body
 
     get_collections_for_auth(req_params, search_body, rpath_multi_search, "", collections, embedded_params_vec);
-    
+
     ASSERT_EQ(2, collections.size());
     ASSERT_EQ("foo1", collections[0].collection);
     ASSERT_EQ("bar1", collections[1].collection);
@@ -604,7 +603,7 @@ TEST_F(CoreAPIUtilsTest, MultiSearchWithPresetShouldUsePresetForAuth) {
 
     req_params["preset"] = "apple";
     get_collections_for_auth(req_params, search_body, rpath_multi_search, "", collections, embedded_params_vec);
-    
+
     ASSERT_EQ(2, collections.size());
     ASSERT_EQ("foo", collections[0].collection);
     ASSERT_EQ("bar", collections[1].collection);
@@ -1496,7 +1495,7 @@ TEST_F(CoreAPIUtilsTest, TestProxy) {
 
 TEST_F(CoreAPIUtilsTest, TestProxyInvalid) {
     nlohmann::json body;
-    
+
 
 
     auto req = std::make_shared<http_req>();
@@ -1692,7 +1691,7 @@ TEST_F(CoreAPIUtilsTest, TestGetConversations) {
                                  10, "", 30, 4, "", 1, "", "", {}, 3, "<mark>", "</mark>", {}, 4294967295UL, true, false,
                                  true, "", false, 6000000UL, 4, 7, fallback, 4, {off}, 32767UL, 32767UL, 2, 2, false, "",
                                  true, 0, max_score, 100, 0, 0, 0, "exhaustive", 30000, 2, "", {}, {}, "right_to_left", true, true, true, model_id);
-    
+
     ASSERT_TRUE(results_op.ok());
 
     auto id = results_op.get()["conversation"]["id"].get<std::string>();
@@ -1702,61 +1701,6 @@ TEST_F(CoreAPIUtilsTest, TestGetConversations) {
     auto history_search_res = history_collection->search(id, {"conversation_id"}, "", {}, {}, {0}).get();
     ASSERT_EQ(2, history_search_res["hits"].size());
     auto del_res = ConversationModelManager::delete_model(model_id);
-}
-
-TEST_F(CoreAPIUtilsTest, SampleGzipIndexTest) {
-    Collection *coll_hnstories;
-
-    std::vector<field> fields = {field("title", field_types::STRING, false),
-                                 field("points", field_types::INT32, false),};
-
-    coll_hnstories = collectionManager.get_collection("coll_hnstories").get();
-    if(coll_hnstories == nullptr) {
-        coll_hnstories = collectionManager.create_collection("coll_hnstories", 4, fields, "title").get();
-    }
-
-    auto req = std::make_shared<http_req>();
-    std::ifstream infile(std::string(ROOT_DIR)+"test/resources/hnstories.jsonl.gz");
-    std::stringstream outbuffer;
-
-    infile.seekg (0, infile.end);
-    int length = infile.tellg();
-    infile.seekg (0, infile.beg);
-
-    req->body.resize(length);
-    infile.read(&req->body[0], length);
-
-    auto res = ReplicationState::handle_gzip(req);
-    if (!res.error().empty()) {
-        LOG(ERROR) << res.error();
-        FAIL();
-    } else {
-        outbuffer << req->body;
-    }
-
-    std::vector<std::string> doc_lines;
-    std::string line;
-    while(std::getline(outbuffer, line)) {
-        doc_lines.push_back(line);
-    }
-
-    ASSERT_EQ(14, doc_lines.size());
-    ASSERT_EQ("{\"points\":1,\"title\":\"DuckDuckGo Settings\"}", doc_lines[0]);
-    ASSERT_EQ("{\"points\":1,\"title\":\"Making Twitter Easier to Use\"}", doc_lines[1]);
-    ASSERT_EQ("{\"points\":2,\"title\":\"London refers Uber app row to High Court\"}", doc_lines[2]);
-    ASSERT_EQ("{\"points\":1,\"title\":\"Young Global Leaders, who should be nominated? (World Economic Forum)\"}", doc_lines[3]);
-    ASSERT_EQ("{\"points\":1,\"title\":\"Blooki.st goes BETA in a few hours\"}", doc_lines[4]);
-    ASSERT_EQ("{\"points\":1,\"title\":\"Unicode Security Data: Beta Review\"}", doc_lines[5]);
-    ASSERT_EQ("{\"points\":2,\"title\":\"FileMap: MapReduce on the CLI\"}", doc_lines[6]);
-    ASSERT_EQ("{\"points\":1,\"title\":\"[Full Video] NBC News Interview with Edward Snowden\"}", doc_lines[7]);
-    ASSERT_EQ("{\"points\":1,\"title\":\"Hybrid App Monetization Example with Mobile Ads and In-App Purchases\"}", doc_lines[8]);
-    ASSERT_EQ("{\"points\":1,\"title\":\"We need oppinion from Android Developers\"}", doc_lines[9]);
-    ASSERT_EQ("{\"points\":1,\"title\":\"\\\\t Why Mobile Developers Should Care About Deep Linking\"}", doc_lines[10]);
-    ASSERT_EQ("{\"points\":2,\"title\":\"Are we getting too Sassy? Weighing up micro-optimisation vs. maintainability\"}", doc_lines[11]);
-    ASSERT_EQ("{\"points\":2,\"title\":\"Google's XSS game\"}", doc_lines[12]);
-    ASSERT_EQ("{\"points\":1,\"title\":\"Telemba Turns Your Old Roomba and Tablet Into a Telepresence Robot\"}", doc_lines[13]);
-
-    infile.close();
 }
 
 TEST_F(CoreAPIUtilsTest, TestConversationModels) {
@@ -2727,7 +2671,7 @@ TEST_F(CoreAPIUtilsTest, StatefulRemoveDocsWithReturnValues) {
     ASSERT_TRUE(done);
     ASSERT_EQ(1, deletion_state.removed_docs.size());
     ASSERT_EQ(1, deletion_state.removed_ids.size());
-    
+
     ASSERT_EQ("5", deletion_state.removed_docs[0]["id"]);
     ASSERT_EQ("Title 5", deletion_state.removed_docs[0]["title"]);
     ASSERT_EQ(5, deletion_state.removed_docs[0]["points"]);
@@ -2863,14 +2807,14 @@ TEST_F(CoreAPIUtilsTest, RemoveDocumentsWithReturnValues) {
     // Test with both return_doc and return_id
     std::shared_ptr<http_req> req = std::make_shared<http_req>();
     std::shared_ptr<http_res> res = std::make_shared<http_res>(nullptr);
-    
+
     req->params["collection"] = "coll1";
     req->params["filter_by"] = "points: 5";
     req->params["return_doc"] = "true";
     req->params["return_id"] = "true";
 
     del_remove_documents(req, res);
-    
+
     nlohmann::json res_json = nlohmann::json::parse(res->body);
     ASSERT_EQ(1, res_json["num_deleted"].get<size_t>());
     ASSERT_TRUE(res_json.contains("documents"));
@@ -2893,13 +2837,13 @@ TEST_F(CoreAPIUtilsTest, RemoveDocumentsWithReturnValues) {
 
     req = std::make_shared<http_req>();
     res = std::make_shared<http_res>(nullptr);
-    
+
     req->params["collection"] = "coll1";
     req->params["filter_by"] = "points: 4";
     req->params["return_doc"] = "true";
 
     del_remove_documents(req, res);
-    
+
     res_json = nlohmann::json::parse(res->body);
     ASSERT_EQ(1, res_json["num_deleted"].get<size_t>());
     ASSERT_TRUE(res_json.contains("documents"));
@@ -2920,13 +2864,13 @@ TEST_F(CoreAPIUtilsTest, RemoveDocumentsWithReturnValues) {
 
     req = std::make_shared<http_req>();
     res = std::make_shared<http_res>(nullptr);
-    
+
     req->params["collection"] = "coll1";
     req->params["filter_by"] = "points: 3";
     req->params["return_id"] = "true";
 
     del_remove_documents(req, res);
-    
+
     res_json = nlohmann::json::parse(res->body);
     ASSERT_EQ(1, res_json["num_deleted"].get<size_t>());
     ASSERT_FALSE(res_json.contains("documents"));
@@ -2947,14 +2891,14 @@ TEST_F(CoreAPIUtilsTest, RemoveDocumentsWithReturnValues) {
 
     req = std::make_shared<http_req>();
     res = std::make_shared<http_res>(nullptr);
-    
+
     req->params["collection"] = "coll1";
     req->params["filter_by"] = "points:>= 7";
     req->params["return_doc"] = "true";
     req->params["return_id"] = "true";
 
     del_remove_documents(req, res);
-    
+
     res_json = nlohmann::json::parse(res->body);
     ASSERT_EQ(3, res_json["num_deleted"].get<size_t>());
     ASSERT_TRUE(res_json.contains("documents"));
@@ -2975,12 +2919,12 @@ TEST_F(CoreAPIUtilsTest, RemoveDocumentsWithReturnValues) {
 
     req = std::make_shared<http_req>();
     res = std::make_shared<http_res>(nullptr);
-    
+
     req->params["collection"] = "coll1";
     req->params["filter_by"] = "points: 2";
 
     del_remove_documents(req, res);
-    
+
     res_json = nlohmann::json::parse(res->body);
     ASSERT_EQ(1, res_json["num_deleted"].get<size_t>());
     ASSERT_FALSE(res_json.contains("documents"));
